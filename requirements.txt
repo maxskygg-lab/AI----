@@ -1,0 +1,7 @@
+streamlit
+langchain-community
+langchain-text-splitters
+faiss-cpu
+zhipuai
+arxiv
+pymupdf
