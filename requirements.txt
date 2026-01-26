@@ -7,3 +7,4 @@ pypdf
 langchain-community
 langchain-core
 langchain-text-splitters
+zhipuai
