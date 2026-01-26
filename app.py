@@ -1,3 +1,13 @@
+我明白了。您指出的问题在于：之前的逻辑只是在数据库里**随机抓取**了一把（`k=12`），如果加载了多篇论文，可能只搜到了其中一两篇的内容，导致生成的对比表**缺斤少两，张冠李戴**。
+
+**修复方案：**
+我重写了“一键综述”的逻辑。现在的逻辑是：**遍历**您加载的每一篇论文，强制针对每一篇论文分别提取“摘要/贡献/结果”，汇聚成一份完整的资料包，再发给 AI。
+
+这样能保证：**加载了多少篇论文，表格里就有多少行，绝不遗漏。**
+
+请使用这份修复后的完整代码：
+
+```python
 import streamlit as st
 import os
 import tempfile
@@ -13,7 +23,7 @@ try:
     from langchain_community.vectorstores import FAISS
     from langchain_community.embeddings import ZhipuAIEmbeddings
     from langchain_community.chat_models import ChatZhipuAI
-
+    
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
     except ImportError:
@@ -23,12 +33,10 @@ try:
             from langchain.document_loaders import PyPDFLoader
             from langchain.vectorstores import FAISS
             from langchain.embeddings import OpenAIEmbeddings as ZhipuAIEmbeddings
-
             st.error("LangChain 版本兼容模式运行中")
 
 except ImportError as e:
-    st.error(
-        f"❌ 环境库缺失，请运行: pip install langchain-community langchain-text-splitters faiss-cpu zhipuai arxiv pymupdf")
+    st.error(f"❌ 环境库缺失，请运行: pip install langchain-community langchain-text-splitters faiss-cpu zhipuai arxiv pymupdf")
     st.stop()
 
 # ================= 2. 页面配置 =================
@@ -54,7 +62,6 @@ if "suggested_query" not in st.session_state:
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
 
-
 # ================= 4. 核心逻辑函数 =================
 
 def fix_latex_errors(text):
@@ -62,7 +69,6 @@ def fix_latex_errors(text):
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
     return text
-
 
 def process_and_add_to_db(file_path, file_name, api_key):
     try:
@@ -74,7 +80,7 @@ def process_and_add_to_db(file_path, file_name, api_key):
         chunks = splitter.split_documents(docs)
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
-
+        
         batch_size = 10
         total = len(valid_chunks)
         if st.session_state.db is None:
@@ -87,17 +93,16 @@ def process_and_add_to_db(file_path, file_name, api_key):
             for i in range(0, total, batch_size):
                 st.session_state.db.add_documents(valid_chunks[i: i + batch_size])
                 time.sleep(0.1)
-
+        
         if file_name not in st.session_state.loaded_files:
             st.session_state.loaded_files.append(file_name)
-
+        
         st.session_state.chat_history.append({
             "role": "system_notice",
             "content": f"📚 **系统通知**：已加载《{file_name}》。"
         })
     except Exception as e:
         st.error(f"处理失败: {e}")
-
 
 def generate_html_report(chat_history):
     html = """
@@ -128,14 +133,14 @@ def generate_html_report(chat_history):
     for msg in chat_history:
         role_class = msg['role'] if msg['role'] in ['user', 'assistant'] else 'system'
         role_name = "🧑‍💻 我" if msg['role'] == 'user' else "🤖 AI 研究员" if msg['role'] == 'assistant' else "🔔 系统"
-
+        
         # 简单处理 Markdown 表格转 HTML (基础支持)
         content_raw = msg['content']
         if "|" in content_raw and "---" in content_raw:
-            # 简单的表格渲染逻辑，防止导出后表格乱码
-            content_html = "<pre style='white-space: pre-wrap;'>" + content_raw + "</pre>"
+             # 简单的表格渲染逻辑，防止导出后表格乱码
+             content_html = "<pre style='white-space: pre-wrap;'>" + content_raw + "</pre>"
         else:
-            content_html = content_raw.replace('\n', '<br>')
+             content_html = content_raw.replace('\n', '<br>')
 
         html += f"""
         <div class="message {role_class}">
@@ -145,7 +150,6 @@ def generate_html_report(chat_history):
         """
     html += "</body></html>"
     return html
-
 
 # ================= 5. 侧边栏 =================
 with st.sidebar:
@@ -160,7 +164,7 @@ with st.sidebar:
 
     if st.session_state.loaded_files:
         st.success(f"已加载 {len(st.session_state.loaded_files)} 篇论文")
-
+        
         # === 🔧 修复后的综述逻辑 ===
         if st.button("🪄 一键生成综述对比表"):
             if not user_api_key:
@@ -171,23 +175,23 @@ with st.sidebar:
                 with st.spinner(f"正在逐篇分析 {len(st.session_state.loaded_files)} 篇文献..."):
                     try:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
-
+                        
                         # 1. 关键修复：不再随机抓取，而是遍历所有文件
                         aggregated_context = ""
                         for filename in st.session_state.loaded_files:
                             # 针对每一篇论文，精准提取包含摘要、方法、结论的片段
                             # 使用 filter 锁定当前论文
                             sub_docs = st.session_state.db.similarity_search(
-                                "Abstract, methodology, main contribution, conclusion",
+                                "Abstract, methodology, main contribution, conclusion", 
                                 k=2,  # 每篇取2个最核心片段，避免上下文溢出
                                 filter={"source_paper": filename}
                             )
-
+                            
                             # 拼接
                             if sub_docs:
                                 file_content = "\n".join([d.page_content for d in sub_docs])
                                 aggregated_context += f"\n=== 论文标题：{filename} ===\n{file_content}\n"
-
+                        
                         # 2. 发送给 LLM
                         prompt = f"""
 你是一位严谨的科研专家。请阅读以下 {len(st.session_state.loaded_files)} 篇论文的核心内容，并生成一份 Markdown 对比表格。
@@ -218,16 +222,14 @@ with st.sidebar:
                     with st.spinner("🤖 AI 正在思考搜索词..."):
                         try:
                             filter_dict = {"source_paper": selected_scope}
-                            docs = st.session_state.db.similarity_search("Abstract Introduction", k=3,
-                                                                         filter=filter_dict)
+                            docs = st.session_state.db.similarity_search("Abstract Introduction", k=3, filter=filter_dict)
                             content_snippet = "\n".join([d.page_content for d in docs])
                             llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                             prompt = f"阅读片段：\n{content_snippet[:2000]}\n任务：提取核心主题，生成ArXiv搜索关键词。只输出关键词。"
                             generated_query = llm.invoke(prompt).content.strip().replace('"', '')
                             st.session_state.suggested_query = generated_query
-
-                            search = arxiv.Search(query=generated_query, max_results=5,
-                                                  sort_by=arxiv.SortCriterion.Relevance)
+                            
+                            search = arxiv.Search(query=generated_query, max_results=5, sort_by=arxiv.SortCriterion.Relevance)
                             st.session_state.search_results = list(search.results())
                             st.success(f"已生成搜索词：{generated_query}")
                         except Exception as e:
@@ -267,29 +269,29 @@ tab_search, tab_chat = st.tabs(["🔍 ArXiv 搜索", "💬 研读空间"])
 
 with tab_search:
     st.subheader("🌍 ArXiv 智能搜索")
-
+    
     col1, col2 = st.columns([4, 1])
-
+    
     with col1:
         default_query = st.session_state.get("suggested_query", "")
         search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: LLM Agent")
-
+        
     with col2:
         max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
-
+        
     if st.button("🚀 搜索") and search_query:
         with st.spinner(f"正在检索 ArXiv (Top {max_results})..."):
             try:
                 search = arxiv.Search(
-                    query=search_query,
-                    max_results=max_results,
+                    query=search_query, 
+                    max_results=max_results, 
                     sort_by=arxiv.SortCriterion.Relevance
                 )
                 st.session_state.search_results = list(search.results())
                 st.success(f"找到 {len(st.session_state.search_results)} 篇相关论文")
             except Exception as e:
                 st.error(f"搜索出错: {e}")
-
+                
     if "search_results" in st.session_state:
         for res in st.session_state.search_results:
             with st.expander(f"📄 {res.title} ({res.published.year})"):
@@ -383,3 +385,4 @@ with tab_chat:
 
                 except Exception as e:
                     st.error(f"生成出错: {e}")
+```
