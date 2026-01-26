@@ -1,32 +1,61 @@
 import streamlit as st
+import sys
+import subprocess
 import os
-import tempfile
 import time
+
+# ================= 🚀 核弹级修复：强制自动安装依赖 =================
+# 这段代码会检测云端环境，如果缺库，直接调用 pip 强制安装
+# 必须放在所有其他 import 之前！
+def force_install():
+    packages = [
+        "zhipuai", 
+        "langchain-community", 
+        "langchain-core",
+        "langchain-text-splitters",
+        "arxiv", 
+        "pymupdf", 
+        "faiss-cpu", 
+        "pypdf"
+    ]
+    installed = False
+    for package in packages:
+        try:
+            # 尝试导入核心模块名（处理包名和模块名不一致的情况）
+            module_name = package.replace("-", "_").split("==")[0]
+            if "langchain" in module_name: module_name = "langchain_community" # 特殊处理
+            if "faiss" in module_name: module_name = "faiss"
+            
+            __import__(module_name)
+        except ImportError:
+            st.warning(f"正在云端补装依赖: {package} ... (第一次运行需要这步，请耐心等待)")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            installed = True
+    
+    if installed:
+        st.success("依赖安装完成！正在重启应用...")
+        time.sleep(2)
+        st.rerun()
+
+# 执行强制安装
+force_install()
+# ===============================================================
+
+# 下面是你正常的代码
+import tempfile
 import re
 import base64
 import arxiv
-import sys
 
-# ================= 0. 环境兼容性修复 =================
+# 再次包裹 import，防止安装后仍有残留缓存问题
 try:
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_community.vectorstores import FAISS
     from langchain_community.embeddings import ZhipuAIEmbeddings
     from langchain_community.chat_models import ChatZhipuAI
-    
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-    except ImportError:
-        try:
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
-        except ImportError:
-            from langchain.document_loaders import PyPDFLoader
-            from langchain.vectorstores import FAISS
-            from langchain.embeddings import OpenAIEmbeddings as ZhipuAIEmbeddings
-            st.error("LangChain 版本兼容模式运行中")
-
-except ImportError as e:
-    st.error(f"❌ 环境库缺失，请运行: pip install langchain-community langchain-text-splitters faiss-cpu zhipuai arxiv pymupdf")
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    st.error("⚠️ 环境正在初始化，请手动刷新网页一次！")
     st.stop()
 
 # ================= 2. 页面配置 =================
@@ -124,10 +153,8 @@ def generate_html_report(chat_history):
         role_class = msg['role'] if msg['role'] in ['user', 'assistant'] else 'system'
         role_name = "🧑‍💻 我" if msg['role'] == 'user' else "🤖 AI 研究员" if msg['role'] == 'assistant' else "🔔 系统"
         
-        # 简单处理 Markdown 表格转 HTML (基础支持)
         content_raw = msg['content']
         if "|" in content_raw and "---" in content_raw:
-             # 简单的表格渲染逻辑，防止导出后表格乱码
              content_html = "<pre style='white-space: pre-wrap;'>" + content_raw + "</pre>"
         else:
              content_html = content_raw.replace('\n', '<br>')
@@ -155,7 +182,6 @@ with st.sidebar:
     if st.session_state.loaded_files:
         st.success(f"已加载 {len(st.session_state.loaded_files)} 篇论文")
         
-        # === 🔧 修复后的综述逻辑 ===
         if st.button("🪄 一键生成综述对比表"):
             if not user_api_key:
                 st.error("需要 API Key")
@@ -165,32 +191,23 @@ with st.sidebar:
                 with st.spinner(f"正在逐篇分析 {len(st.session_state.loaded_files)} 篇文献..."):
                     try:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
-                        
-                        # 1. 关键修复：不再随机抓取，而是遍历所有文件
                         aggregated_context = ""
                         for filename in st.session_state.loaded_files:
-                            # 针对每一篇论文，精准提取包含摘要、方法、结论的片段
-                            # 使用 filter 锁定当前论文
                             sub_docs = st.session_state.db.similarity_search(
                                 "Abstract, methodology, main contribution, conclusion", 
-                                k=2,  # 每篇取2个最核心片段，避免上下文溢出
+                                k=2, 
                                 filter={"source_paper": filename}
                             )
-                            
-                            # 拼接
                             if sub_docs:
                                 file_content = "\n".join([d.page_content for d in sub_docs])
                                 aggregated_context += f"\n=== 论文标题：{filename} ===\n{file_content}\n"
                         
-                        # 2. 发送给 LLM
                         prompt = f"""
 你是一位严谨的科研专家。请阅读以下 {len(st.session_state.loaded_files)} 篇论文的核心内容，并生成一份 Markdown 对比表格。
-
 【要求】：
 1. **必须包含所有论文**：每一篇论文（{', '.join(st.session_state.loaded_files)}）都必须在表格中占一行。
 2. **表格列名**：论文名称 | 核心创新点 | 方法论/算法 | 实验结果/结论 。
 3. 内容要精炼概括。
-
 【待分析内容】：
 {aggregated_context}
 """
@@ -259,13 +276,10 @@ tab_search, tab_chat = st.tabs(["🔍 ArXiv 搜索", "💬 研读空间"])
 
 with tab_search:
     st.subheader("🌍 ArXiv 智能搜索")
-    
     col1, col2 = st.columns([4, 1])
-    
     with col1:
         default_query = st.session_state.get("suggested_query", "")
         search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: LLM Agent")
-        
     with col2:
         max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
         
@@ -322,9 +336,11 @@ with tab_chat:
             with st.chat_message("assistant"):
                 try:
                     search_k = 15 if "精读" in reading_mode else 8
-                    current_scope = "🌐 对比所有论文"
                     try:
-                        filter_dict = {"source_paper": selected_scope} if selected_scope != "🌐 对比所有论文" else None
+                        if selected_scope != "🌐 对比所有论文":
+                            filter_dict = {"source_paper": selected_scope} 
+                        else:
+                            filter_dict = None
                     except:
                         filter_dict = None
 
@@ -355,7 +371,6 @@ with tab_chat:
 {history_context}
 【当前问题】：
 {prompt}
-
 【严格回答规范】：
 1. **数学公式**：所有变量、公式必须用单美元符号 $ 包裹！
 2. **内容去噪**：忽略参考文献。
