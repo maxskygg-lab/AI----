@@ -124,7 +124,6 @@ def generate_html_report(chat_history):
         role_class = msg['role'] if msg['role'] in ['user', 'assistant'] else 'system'
         role_name = "🧑‍💻 我" if msg['role'] == 'user' else "🤖 AI 研究员" if msg['role'] == 'assistant' else "🔔 系统"
         
-        # 简单处理 Markdown 表格转 HTML
         content_raw = msg['content']
         if "|" in content_raw and "---" in content_raw:
              content_html = "<pre style='white-space: pre-wrap;'>" + content_raw + "</pre>"
@@ -147,6 +146,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("⚙️ 研读模式")
+    # 这一行的 reading_mode 必须定义好
     reading_mode = st.radio("选择模式:", ["🟢 快速问答", "📖 逐段精读 (公式修复版)"], index=1)
 
     st.markdown("---")
@@ -154,7 +154,6 @@ with st.sidebar:
     if st.session_state.loaded_files:
         st.success(f"已加载 {len(st.session_state.loaded_files)} 篇论文")
         
-        # === 🔧 修复后的综述逻辑 ===
         if st.button("🪄 一键生成综述对比表"):
             if not user_api_key:
                 st.error("需要 API Key")
@@ -164,7 +163,6 @@ with st.sidebar:
                 with st.spinner(f"正在逐篇分析 {len(st.session_state.loaded_files)} 篇文献..."):
                     try:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
-                        
                         aggregated_context = ""
                         for filename in st.session_state.loaded_files:
                             sub_docs = st.session_state.db.similarity_search(
@@ -178,12 +176,10 @@ with st.sidebar:
                         
                         prompt = f"""
 你是一位严谨的科研专家。请阅读以下 {len(st.session_state.loaded_files)} 篇论文的核心内容，并生成一份 Markdown 对比表格。
-
 【要求】：
 1. **必须包含所有论文**：每一篇论文（{', '.join(st.session_state.loaded_files)}）都必须在表格中占一行。
 2. **表格列名**：论文名称 | 核心创新点 | 方法论/算法 | 实验结果/结论 。
 3. 内容要精炼概括。
-
 【待分析内容】：
 {aggregated_context}
 """
@@ -252,13 +248,10 @@ tab_search, tab_chat = st.tabs(["🔍 ArXiv 搜索", "💬 研读空间"])
 
 with tab_search:
     st.subheader("🌍 ArXiv 智能搜索")
-    
     col1, col2 = st.columns([4, 1])
-    
     with col1:
         default_query = st.session_state.get("suggested_query", "")
         search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: LLM Agent")
-        
     with col2:
         max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
         
@@ -314,4 +307,60 @@ with tab_chat:
 
             with st.chat_message("assistant"):
                 try:
-                    search_k = 15 if "精读" in rea_
+                    # === 核心逻辑修改：修正了这里的语法错误 ===
+                    search_k = 15 if "精读" in reading_mode else 8
+                    
+                    try:
+                        if selected_scope != "🌐 对比所有论文":
+                            filter_dict = {"source_paper": selected_scope} 
+                        else:
+                            filter_dict = None
+                    except:
+                        filter_dict = None
+
+                    docs = st.session_state.db.similarity_search(prompt, k=search_k, filter=filter_dict)
+
+                    if not docs:
+                        st.warning("未找到相关内容。")
+                        st.stop()
+
+                    context_parts = []
+                    for d in docs:
+                        source = d.metadata.get('source_paper', '未知')
+                        page = d.metadata.get('page', 0) + 1
+                        context_parts.append(f"📄【{source} P{page}】:\n{d.page_content}")
+
+                    full_context = "\n\n".join(context_parts)
+                    history_context = ""
+                    recent_msgs = [m for m in st.session_state.chat_history if m["role"] in ["user", "assistant"]][-4:]
+                    for m in recent_msgs:
+                        role_label = "用户" if m["role"] == "user" else "AI助手"
+                        history_context += f"{role_label}: {m['content']}\n"
+
+                    if "精读" in reading_mode:
+                        system_prompt = f"""你是一位严谨的科研助手。
+【资料检索】：
+{full_context}
+【历史记录】：
+{history_context}
+【当前问题】：
+{prompt}
+【严格回答规范】：
+1. **数学公式**：所有变量、公式必须用单美元符号 $ 包裹！
+2. **内容去噪**：忽略参考文献。
+"""
+                    else:
+                        system_prompt = f"""你是一个助手。请简要回答。
+资料：{full_context}
+问题：{prompt}
+要求：引用来源。公式必须用 $...$ 包裹。
+"""
+                    llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                    response = llm.invoke(system_prompt)
+                    final_content = fix_latex_errors(response.content)
+
+                    st.write(final_content)
+                    st.session_state.chat_history.append({"role": "assistant", "content": final_content})
+
+                except Exception as e:
+                    st.error(f"生成出错: {e}")
