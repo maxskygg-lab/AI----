@@ -1,61 +1,24 @@
 import streamlit as st
-import sys
-import subprocess
 import os
-import time
-
-# ================= 🚀 核弹级修复：强制自动安装依赖 =================
-# 这段代码会检测云端环境，如果缺库，直接调用 pip 强制安装
-# 必须放在所有其他 import 之前！
-def force_install():
-    packages = [
-        "zhipuai", 
-        "langchain-community", 
-        "langchain-core",
-        "langchain-text-splitters",
-        "arxiv", 
-        "pymupdf", 
-        "faiss-cpu", 
-        "pypdf"
-    ]
-    installed = False
-    for package in packages:
-        try:
-            # 尝试导入核心模块名（处理包名和模块名不一致的情况）
-            module_name = package.replace("-", "_").split("==")[0]
-            if "langchain" in module_name: module_name = "langchain_community" # 特殊处理
-            if "faiss" in module_name: module_name = "faiss"
-            
-            __import__(module_name)
-        except ImportError:
-            st.warning(f"正在云端补装依赖: {package} ... (第一次运行需要这步，请耐心等待)")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            installed = True
-    
-    if installed:
-        st.success("依赖安装完成！正在重启应用...")
-        time.sleep(2)
-        st.rerun()
-
-# 执行强制安装
-force_install()
-# ===============================================================
-
-# 下面是你正常的代码
 import tempfile
+import time
 import re
 import base64
 import arxiv
+import sys
 
-# 再次包裹 import，防止安装后仍有残留缓存问题
+# ================= 0. 导入依赖 =================
+# 既然云端日志显示已安装，我们直接导入，不再做自动安装的骚操作
 try:
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_community.vectorstores import FAISS
     from langchain_community.embeddings import ZhipuAIEmbeddings
     from langchain_community.chat_models import ChatZhipuAI
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:
-    st.error("⚠️ 环境正在初始化，请手动刷新网页一次！")
+except ImportError as e:
+    # 如果真的还缺，这里会提示，而不是死循环
+    st.error(f"❌ 启动失败：缺少依赖库。报错信息: {e}")
+    st.info("💡 如果你是云端部署，请检查 requirements.txt 是否包含：zhipuai, langchain-community, faiss-cpu, arxiv, pymupdf, pypdf")
     st.stop()
 
 # ================= 2. 页面配置 =================
