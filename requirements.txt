@@ -1,7 +1,9 @@
 streamlit
 langchain-community
+langchain-core
 langchain-text-splitters
-faiss-cpu
 zhipuai
 arxiv
 pymupdf
+faiss-cpu
+pypdf
