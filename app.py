@@ -234,4 +234,163 @@ with st.sidebar:
                         try:
                             filter_dict = {"source_paper": selected_scope}
                             docs = st.session_state.db.similarity_search("Abstract Introduction", k=3, filter=filter_dict)
-                            content_snippet = "\n".join([d.page_con_]()_
+                            content_snippet = "\n".join([d.page_content for d in docs])
+                            llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                            prompt = f"阅读片段：\n{content_snippet[:2000]}\n任务：提取核心主题，生成ArXiv搜索关键词。只输出关键词。"
+                            generated_query = llm.invoke(prompt).content.strip().replace('"', '')
+                            st.session_state.suggested_query = generated_query
+                            
+                            search = arxiv.Search(query=generated_query, max_results=5, sort_by=arxiv.SortCriterion.Relevance)
+                            st.session_state.search_results = list(search.results())
+                            st.success(f"已生成搜索词：{generated_query}")
+                        except Exception as e:
+                            st.error(f"挖掘失败: {e}")
+
+        if st.button("🗑️ 清空知识库"):
+            st.session_state.db = None
+            st.session_state.loaded_files = []
+            st.session_state.chat_history = []
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("📝 笔记导出")
+        if st.session_state.chat_history:
+            html_content = generate_html_report(st.session_state.chat_history)
+            st.download_button(
+                label="📄 下载 网页/PDF 格式",
+                data=html_content,
+                file_name="research_notes.html",
+                mime="text/html"
+            )
+
+    st.markdown("---")
+    st.subheader("📥 上传论文")
+    uploaded_file = st.file_uploader("拖入 PDF", type="pdf")
+    if uploaded_file and user_api_key and st.button("确认加载"):
+        with st.spinner("解析中..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                path = tmp.name
+            process_and_add_to_db(path, uploaded_file.name, user_api_key)
+            os.remove(path)
+            st.rerun()
+
+# ================= 6. 主界面 =================
+tab_search, tab_chat = st.tabs(["🔍 ArXiv 搜索", "💬 研读空间"])
+
+with tab_search:
+    st.subheader("🌍 ArXiv 智能搜索")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        default_query = st.session_state.get("suggested_query", "")
+        search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: LLM Agent")
+    with col2:
+        max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
+        
+    if st.button("🚀 搜索") and search_query:
+        with st.spinner(f"正在检索 ArXiv (Top {max_results})..."):
+            try:
+                search = arxiv.Search(
+                    query=search_query, 
+                    max_results=max_results, 
+                    sort_by=arxiv.SortCriterion.Relevance
+                )
+                st.session_state.search_results = list(search.results())
+                st.success(f"找到 {len(st.session_state.search_results)} 篇相关论文")
+            except Exception as e:
+                st.error(f"搜索出错: {e}")
+                
+    if "search_results" in st.session_state:
+        for res in st.session_state.search_results:
+            with st.expander(f"📄 {res.title} ({res.published.year})"):
+                st.write(f"**作者**: {', '.join([a.name for a in res.authors[:3]])}...")
+                st.write(f"**摘要**: {res.summary[:300]}...")
+                st.markdown(f"[原文链接]({res.entry_id})")
+                if st.button(f"⬇️ 下载并研读", key=res.entry_id):
+                    if not user_api_key:
+                        st.error("请先配置 API Key")
+                    else:
+                        with st.spinner("下载中..."):
+                            try:
+                                pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
+                                process_and_add_to_db(pdf_path, res.title, user_api_key)
+                                st.success("入库成功！")
+                            except Exception as e:
+                                st.error(f"下载失败: {e}")
+
+with tab_chat:
+    if st.session_state.loaded_files:
+        st.caption(f"📚 模式：{reading_mode}")
+
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "system_notice":
+            st.info(msg["content"])
+        else:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    if prompt := st.chat_input("输入问题..."):
+        if not st.session_state.db:
+            st.warning("🧠 请先添加论文")
+        else:
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.write(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    search_k = 15 if "精读" in reading_mode else 8
+                    try:
+                        if selected_scope != "🌐 对比所有论文":
+                            filter_dict = {"source_paper": selected_scope} 
+                        else:
+                            filter_dict = None
+                    except:
+                        filter_dict = None
+
+                    docs = st.session_state.db.similarity_search(prompt, k=search_k, filter=filter_dict)
+
+                    if not docs:
+                        st.warning("未找到相关内容。")
+                        st.stop()
+
+                    context_parts = []
+                    for d in docs:
+                        source = d.metadata.get('source_paper', '未知')
+                        page = d.metadata.get('page', 0) + 1
+                        context_parts.append(f"📄【{source} P{page}】:\n{d.page_content}")
+
+                    full_context = "\n\n".join(context_parts)
+                    history_context = ""
+                    recent_msgs = [m for m in st.session_state.chat_history if m["role"] in ["user", "assistant"]][-4:]
+                    for m in recent_msgs:
+                        role_label = "用户" if m["role"] == "user" else "AI助手"
+                        history_context += f"{role_label}: {m['content']}\n"
+
+                    if "精读" in reading_mode:
+                        system_prompt = f"""你是一位严谨的科研助手。
+【资料检索】：
+{full_context}
+【历史记录】：
+{history_context}
+【当前问题】：
+{prompt}
+【严格回答规范】：
+1. **数学公式**：所有变量、公式必须用单美元符号 $ 包裹！
+2. **内容去噪**：忽略参考文献。
+"""
+                    else:
+                        system_prompt = f"""你是一个助手。请简要回答。
+资料：{full_context}
+问题：{prompt}
+要求：引用来源。公式必须用 $...$ 包裹。
+"""
+                    llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                    response = llm.invoke(system_prompt)
+                    final_content = fix_latex_errors(response.content)
+
+                    st.write(final_content)
+                    st.session_state.chat_history.append({"role": "assistant", "content": final_content})
+
+                except Exception as e:
+                    st.error(f"生成出错: {e}")
