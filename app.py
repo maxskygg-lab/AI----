@@ -1,56 +1,36 @@
 import streamlit as st
-import sys
-import subprocess
-import importlib
 import os
-import time
-
-# ================= 🛡️ 智能依赖修复 (防死循环版) =================
-def auto_fix_environment():
-    # 📦 定义：安装包名 vs 导入名 (这里是导致死循环的关键)
-    packages = {
-        "zhipuai": "zhipuai",
-        "arxiv": "arxiv",
-        "pymupdf": "fitz",          # <--- 修正：安装 pymupdf，检查 fitz
-        "faiss-cpu": "faiss",       # <--- 修正：安装 faiss-cpu，检查 faiss
-        "pypdf": "pypdf",
-        "langchain-community": "langchain_community",
-        "langchain-text-splitters": "langchain_text_splitters"
-    }
-    
-    missing_packages = []
-    
-    for pkg_name, import_name in packages.items():
-        try:
-            importlib.import_module(import_name)
-        except ImportError:
-            missing_packages.append(pkg_name)
-    
-    if missing_packages:
-        st.warning(f"🔧 正在自动补全缺失库: {', '.join(missing_packages)} ...")
-        st.caption("首次运行需要安装依赖，请耐心等待约 1 分钟...")
-        
-        try:
-            # 一次性安装所有缺失的包
-            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing_packages)
-            st.success("✅ 安装完成！正在自动重启...")
-            time.sleep(2)
-            st.rerun() # 安装成功后刷新页面
-        except Exception as e:
-            st.error(f"❌ 自动安装失败: {e}")
-            st.stop()
-
-# 执行环境检查
-auto_fix_environment()
-# =============================================================
-
-# 下面是你的主程序逻辑
 import tempfile
-import re
+import time
 import base64
-import arxiv
+import sys
 
-# 再次尝试导入，确保万无一失
+# ================= 1. 纯净依赖检查 (绝无死循环) =================
+# 我们只尝试导入。如果环境里没有，直接提示你去改 requirements.txt
+# 不会再尝试自动安装，确保稳定。
+
+missing_libs = []
+
+try:
+    import zhipuai
+except ImportError:
+    missing_libs.append("zhipuai")
+
+try:
+    import arxiv
+except ImportError:
+    missing_libs.append("arxiv")
+
+try:
+    import fitz  # 对应 pymupdf
+except ImportError:
+    missing_libs.append("pymupdf")
+
+try:
+    import faiss # 对应 faiss-cpu
+except ImportError:
+    missing_libs.append("faiss-cpu")
+
 try:
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_community.vectorstores import FAISS
@@ -58,8 +38,13 @@ try:
     from langchain_community.chat_models import ChatZhipuAI
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
-    # 极罕见情况：安装了但还没加载进内存，提示用户手动刷新
-    st.warning("⚠️ 依赖已安装，请手动点击浏览器刷新按钮！")
+    missing_libs.extend(["langchain-community", "langchain-text-splitters", "pypdf"])
+
+# 如果发现缺库，显示红色错误并停止，绝不反复刷新
+if missing_libs:
+    st.error("🚫 启动停止：检测到环境缺失以下库，请检查 requirements.txt")
+    st.code("\n".join(set(missing_libs)), language="text")
+    st.info("💡 请在你的 GitHub 仓库中找到 `requirements.txt` 文件，确保包含上述名字。")
     st.stop()
 
 # ================= 2. 页面配置 =================
@@ -89,6 +74,7 @@ if "search_results" not in st.session_state:
 
 def fix_latex_errors(text):
     if not text: return text
+    # 修复常见公式格式
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
     return text
@@ -99,13 +85,18 @@ def process_and_add_to_db(file_path, file_name, api_key):
         docs = loader.load()
         for doc in docs:
             doc.metadata['source_paper'] = file_name
+        
         splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
         chunks = splitter.split_documents(docs)
+        # 过滤掉太短的碎片
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
+        
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
         
+        # 分批处理以防止内存溢出
         batch_size = 10
         total = len(valid_chunks)
+        
         if st.session_state.db is None:
             st.session_state.db = FAISS.from_documents(valid_chunks[:batch_size], embeddings)
             if total > batch_size:
@@ -158,6 +149,7 @@ def generate_html_report(chat_history):
         role_name = "🧑‍💻 我" if msg['role'] == 'user' else "🤖 AI 研究员" if msg['role'] == 'assistant' else "🔔 系统"
         
         content_raw = msg['content']
+        # 简单处理 Markdown 表格
         if "|" in content_raw and "---" in content_raw:
              content_html = "<pre style='white-space: pre-wrap;'>" + content_raw + "</pre>"
         else:
@@ -340,6 +332,7 @@ with tab_chat:
             with st.chat_message("assistant"):
                 try:
                     search_k = 15 if "精读" in reading_mode else 8
+                    # 尝试读取 scope，失败则忽略
                     try:
                         if selected_scope != "🌐 对比所有论文":
                             filter_dict = {"source_paper": selected_scope} 
