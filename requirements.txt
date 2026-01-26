@@ -1,10 +1,10 @@
 streamlit
-zhipuai
+zhipuai>=2.0.0
+langchain-community
+langchain-core
+langchain-text-splitters
 arxiv
 pymupdf
 faiss-cpu
 pypdf
-langchain-community
-langchain-core
-langchain-text-splitters
-zhipuai
+httpx
