@@ -3,10 +3,9 @@ import sys
 import os
 import time
 import tempfile
-import base64
 import arxiv
 
-# ================= 🏥 环境听诊器 (保持稳定) =================
+# ================= 🏥 环境听诊器 =================
 try:
     import zhipuai
     import langchain_community
@@ -14,7 +13,7 @@ try:
 except ImportError as e:
     st.error(f"🚑 环境缺失库 -> {e.name}")
     st.stop()
-# ==========================================================
+# ===============================================
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
@@ -23,14 +22,14 @@ from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
-st.set_page_config(page_title="AI 深度研读助手", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="AI 深度研读助手 (高精版)", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
     .stButton>button {width: 100%; border-radius: 8px;}
     .reportview-container { margin-top: -2em; }
 </style>
 """, unsafe_allow_html=True)
-st.title("📖 AI 深度研读助手 (全功能版)")
+st.title("📖 AI 深度研读助手 (高精度内核版)")
 
 # ================= 3. 状态初始化 =================
 if "chat_history" not in st.session_state:
@@ -58,9 +57,17 @@ def process_and_add_to_db(file_path, file_name, api_key):
         docs = loader.load()
         for doc in docs:
             doc.metadata['source_paper'] = file_name
-        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+        
+        # ⚡️ 核心升级 1：针对学术论文的更细致切分策略
+        # 减小 chunk_size 以聚焦具体定义，增加 overlap 保证上下文连续
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=600,       # 缩小块大小，提高检索定位精度
+            chunk_overlap=200,    # 增加重叠，防止关键句子被切断
+            separators=["\n\n", "\n", "。", ".", " ", ""] # 优先按段落切分
+        )
         chunks = splitter.split_documents(docs)
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
+        
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
         
         batch_size = 10
@@ -121,7 +128,7 @@ def generate_html_report(chat_history):
     html += "</body></html>"
     return html
 
-# ================= 5. 侧边栏 (功能区) =================
+# ================= 5. 侧边栏 =================
 with st.sidebar:
     st.header("🎛️ 控制台")
     user_api_key = st.text_input("智谱 API Key", type="password")
@@ -147,7 +154,8 @@ with st.sidebar:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         aggregated_context = ""
                         for filename in st.session_state.loaded_files:
-                            sub_docs = st.session_state.db.similarity_search("Abstract conclusion", k=2, filter={"source_paper": filename})
+                            # 增大上下文获取量，保证总结更准
+                            sub_docs = st.session_state.db.similarity_search("Abstract conclusion main contribution", k=3, filter={"source_paper": filename})
                             if sub_docs:
                                 file_content = "\n".join([d.page_content for d in sub_docs])
                                 aggregated_context += f"\n=== {filename} ===\n{file_content}\n"
@@ -159,46 +167,44 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"生成失败: {e}")
 
-        # 2. 挖掘关联论文 (这里修复了！现在常驻显示)
+        # 2. 挖掘关联论文
         scope_options = ["🌐 对比所有论文"] + st.session_state.loaded_files
         selected_scope = st.selectbox("👁️ 专注范围", scope_options)
         
-        # 🟢 关键修复：把按钮移出来，让它更容易被点到
         if st.button(f"🔍 基于【{selected_scope[:5]}...】挖掘新论文"):
             if not user_api_key:
                 st.error("请填入 API Key")
             else:
-                with st.spinner("🤖 AI 正在阅读并构思搜索词..."):
+                with st.spinner("🤖 AI 正在深度分析文本，提炼搜索词..."):
                     try:
-                        # 根据选择的范围决定读取什么内容
                         if selected_scope == "🌐 对比所有论文":
-                            # 如果选了所有，就随机抽取一些摘要
-                            docs = st.session_state.db.similarity_search("Abstract Future Work", k=4)
+                            docs = st.session_state.db.similarity_search("Abstract Future Work limitation", k=5)
                         else:
-                            # 如果选了单篇，就只读那篇
-                            docs = st.session_state.db.similarity_search("Abstract Introduction", k=3, filter={"source_paper": selected_scope})
+                            docs = st.session_state.db.similarity_search("Abstract Introduction related work", k=4, filter={"source_paper": selected_scope})
                         
                         content_snippet = "\n".join([d.page_content for d in docs])
                         
-                        # 让 AI 生成搜索词
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.5)
+                        # ⚡️ 核心升级 2：更专业的搜索词 Prompt
                         prompt = f"""
-                        任务：阅读以下论文片段，提取其核心研究领域和潜在的关联方向。
-                        输出：请直接输出 1 个最适合在 ArXiv 上搜索的英文关键词（QueryString）。不要包含其他废话。
+                        任务：你是一个专业的科研助理。根据以下论文片段，识别核心研究问题。
+                        目标：生成 1 个能在 ArXiv 获得高质量结果的英文搜索 Query。
+                        要求：
+                        1. 尽量使用组合关键词（如 "Large Language Model" AND "Reasoning"）。
+                        2. 排除过于宽泛的词（如 "AI"）。
+                        3. 只输出 Query 字符串本身，不要包含其他解释。
                         
                         片段：
                         {content_snippet[:2000]}
                         """
                         generated_query = llm.invoke(prompt).content.strip().replace('"', '').replace("'", "")
                         
-                        # 存入状态，并切换 Tab
                         st.session_state.suggested_query = generated_query
                         
-                        # 自动执行一次搜索
                         search = arxiv.Search(query=generated_query, max_results=5, sort_by=arxiv.SortCriterion.Relevance)
                         st.session_state.search_results = list(search.results())
                         
-                        st.success(f"已生成关键词：{generated_query}")
+                        st.success(f"高精搜索词：{generated_query}")
                         st.info("👈 请点击主界面的 '🔍 ArXiv 搜索' 标签页查看结果")
                     except Exception as e:
                         st.error(f"挖掘失败: {e}")
@@ -234,9 +240,8 @@ with tab_search:
     st.subheader("🌍 ArXiv 智能搜索")
     col1, col2 = st.columns([4, 1])
     with col1:
-        # 这里会自动填入 AI 挖掘出的关键词
         default_query = st.session_state.get("suggested_query", "")
-        search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: LLM Agent")
+        search_query = st.text_input("输入关键词", value=default_query, placeholder="支持布尔搜索: LLM AND Agent")
     with col2:
         max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
         
@@ -297,7 +302,17 @@ with tab_chat:
                     except:
                         filter_dict = None
 
-                    docs = st.session_state.db.similarity_search(prompt, k=search_k, filter=filter_dict)
+                    # ⚡️ 核心升级 3：使用 MMR (Maximal Marginal Relevance) 算法
+                    # 作用：不仅要像（Relevance），还要多样（Marginal）。
+                    # fetch_k=20: 先找 20 个最像的
+                    # lambda_mult=0.6: 0.6的权重给相关性，0.4给多样性。防止 AI 总是引用同一段话。
+                    docs = st.session_state.db.max_marginal_relevance_search(
+                        prompt, 
+                        k=search_k, 
+                        fetch_k=20,
+                        lambda_mult=0.6,
+                        filter=filter_dict
+                    )
 
                     if not docs:
                         st.warning("未找到相关内容。")
@@ -315,7 +330,10 @@ with tab_chat:
                         system_prompt = f"""你是一位严谨的科研助手。基于资料回答问题。
 资料：{full_context}
 问题：{prompt}
-要求：必须使用 $...$ 包裹数学公式。忽略参考文献。
+要求：
+1. 必须使用 $...$ 包裹数学公式。
+2. 尽可能引用多个不同片段的信息来回答，不要只盯着一段。
+3. 忽略参考文献列表。
 """
                     else:
                         system_prompt = f"""你是一个助手。请简要回答。
