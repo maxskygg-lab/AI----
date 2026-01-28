@@ -22,14 +22,14 @@ from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
-st.set_page_config(page_title="AI 深度研读助手 (高精版)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="AI 深度研读助手 (Deep Search)", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
     .stButton>button {width: 100%; border-radius: 8px;}
     .reportview-container { margin-top: -2em; }
 </style>
 """, unsafe_allow_html=True)
-st.title("📖 AI 深度研读助手 (高精度内核版)")
+st.title("📖 AI 深度研读助手 (Deep Search 版)")
 
 # ================= 3. 状态初始化 =================
 if "chat_history" not in st.session_state:
@@ -38,6 +38,8 @@ if "db" not in st.session_state:
     st.session_state.db = None
 if "loaded_files" not in st.session_state:
     st.session_state.loaded_files = []
+if "all_chunks" not in st.session_state:
+    st.session_state.all_chunks = []
 if "suggested_query" not in st.session_state:
     st.session_state.suggested_query = ""
 if "search_results" not in st.session_state:
@@ -51,6 +53,13 @@ def fix_latex_errors(text):
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
     return text
 
+def rebuild_index_from_chunks(api_key):
+    if not st.session_state.all_chunks:
+        st.session_state.db = None
+        return
+    embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+    st.session_state.db = FAISS.from_documents(st.session_state.all_chunks, embeddings)
+
 def process_and_add_to_db(file_path, file_name, api_key):
     try:
         loader = PyPDFLoader(file_path)
@@ -58,15 +67,15 @@ def process_and_add_to_db(file_path, file_name, api_key):
         for doc in docs:
             doc.metadata['source_paper'] = file_name
         
-        # ⚡️ 核心升级 1：针对学术论文的更细致切分策略
-        # 减小 chunk_size 以聚焦具体定义，增加 overlap 保证上下文连续
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,       # 缩小块大小，提高检索定位精度
-            chunk_overlap=200,    # 增加重叠，防止关键句子被切断
-            separators=["\n\n", "\n", "。", ".", " ", ""] # 优先按段落切分
+            chunk_size=600,       
+            chunk_overlap=200,    
+            separators=["\n\n", "\n", "。", ".", " ", ""]
         )
         chunks = splitter.split_documents(docs)
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
+        
+        st.session_state.all_chunks.extend(valid_chunks)
         
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
         
@@ -134,15 +143,42 @@ with st.sidebar:
     user_api_key = st.text_input("智谱 API Key", type="password")
 
     st.markdown("---")
+    
+    # 🗂️ 文件管理区域
+    if st.session_state.loaded_files:
+        st.subheader("🗂️ 文件管理")
+        for file in list(st.session_state.loaded_files):
+            col_f1, col_f2 = st.columns([4, 1])
+            with col_f1:
+                st.text(f"📄 {file[:18]}..." if len(file)>20 else f"📄 {file}")
+            with col_f2:
+                if st.button("🗑️", key=f"del_{file}", help=f"删除 {file}"):
+                    st.session_state.loaded_files.remove(file)
+                    st.session_state.all_chunks = [
+                        c for c in st.session_state.all_chunks 
+                        if c.metadata.get('source_paper') != file
+                    ]
+                    if user_api_key:
+                        with st.spinner("正在重组知识库..."):
+                            rebuild_index_from_chunks(user_api_key)
+                            st.rerun()
+                    else:
+                        st.error("需要 API Key 来重组数据库")
+        
+        if st.button("🗑️ 清空全部", type="primary"):
+            st.session_state.db = None
+            st.session_state.loaded_files = []
+            st.session_state.all_chunks = []
+            st.session_state.chat_history = []
+            st.rerun()
+        st.markdown("---")
+
     st.subheader("⚙️ 研读模式")
     reading_mode = st.radio("选择模式:", ["🟢 快速问答", "📖 逐段精读 (公式修复版)"], index=1)
 
     st.markdown("---")
 
     if st.session_state.loaded_files:
-        st.success(f"已加载 {len(st.session_state.loaded_files)} 篇论文")
-        
-        # 1. 综述生成
         if st.button("🪄 一键生成综述对比表"):
             if not user_api_key:
                 st.error("需要 API Key")
@@ -154,12 +190,10 @@ with st.sidebar:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         aggregated_context = ""
                         for filename in st.session_state.loaded_files:
-                            # 增大上下文获取量，保证总结更准
                             sub_docs = st.session_state.db.similarity_search("Abstract conclusion main contribution", k=3, filter={"source_paper": filename})
                             if sub_docs:
                                 file_content = "\n".join([d.page_content for d in sub_docs])
                                 aggregated_context += f"\n=== {filename} ===\n{file_content}\n"
-                        
                         prompt = f"阅读以下论文摘要，生成 Markdown 对比表格(列：论文名|创新点|方法|结论)：\n{aggregated_context}"
                         res = llm.invoke(prompt)
                         st.session_state.chat_history.append({"role": "assistant", "content": res.content})
@@ -167,7 +201,6 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"生成失败: {e}")
 
-        # 2. 挖掘关联论文
         scope_options = ["🌐 对比所有论文"] + st.session_state.loaded_files
         selected_scope = st.selectbox("👁️ 专注范围", scope_options)
         
@@ -181,39 +214,24 @@ with st.sidebar:
                             docs = st.session_state.db.similarity_search("Abstract Future Work limitation", k=5)
                         else:
                             docs = st.session_state.db.similarity_search("Abstract Introduction related work", k=4, filter={"source_paper": selected_scope})
-                        
                         content_snippet = "\n".join([d.page_content for d in docs])
-                        
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.5)
-                        # ⚡️ 核心升级 2：更专业的搜索词 Prompt
                         prompt = f"""
                         任务：你是一个专业的科研助理。根据以下论文片段，识别核心研究问题。
                         目标：生成 1 个能在 ArXiv 获得高质量结果的英文搜索 Query。
-                        要求：
-                        1. 尽量使用组合关键词（如 "Large Language Model" AND "Reasoning"）。
-                        2. 排除过于宽泛的词（如 "AI"）。
-                        3. 只输出 Query 字符串本身，不要包含其他解释。
-                        
                         片段：
                         {content_snippet[:2000]}
                         """
                         generated_query = llm.invoke(prompt).content.strip().replace('"', '').replace("'", "")
-                        
                         st.session_state.suggested_query = generated_query
                         
-                        search = arxiv.Search(query=generated_query, max_results=5, sort_by=arxiv.SortCriterion.Relevance)
+                        # 自动搜索
+                        search = arxiv.Search(query=generated_query, max_results=20, sort_by=arxiv.SortCriterion.Relevance)
                         st.session_state.search_results = list(search.results())
-                        
-                        st.success(f"高精搜索词：{generated_query}")
-                        st.info("👈 请点击主界面的 '🔍 ArXiv 搜索' 标签页查看结果")
+                        st.success(f"已生成关键词：{generated_query}")
+                        st.info("👈 请点击 '🔍 ArXiv 搜索' 查看。您现在可以手动调整搜索数量了！")
                     except Exception as e:
                         st.error(f"挖掘失败: {e}")
-
-        if st.button("🗑️ 清空知识库"):
-            st.session_state.db = None
-            st.session_state.loaded_files = []
-            st.session_state.chat_history = []
-            st.rerun()
 
         st.markdown("---")
         st.subheader("📝 笔记导出")
@@ -237,30 +255,43 @@ with st.sidebar:
 tab_search, tab_chat = st.tabs(["🔍 ArXiv 搜索", "💬 研读空间"])
 
 with tab_search:
-    st.subheader("🌍 ArXiv 智能搜索")
+    st.subheader("🌍 ArXiv 智能搜索 (Deep Search)")
     col1, col2 = st.columns([4, 1])
     with col1:
         default_query = st.session_state.get("suggested_query", "")
         search_query = st.text_input("输入关键词", value=default_query, placeholder="支持布尔搜索: LLM AND Agent")
     with col2:
-        max_results = st.number_input("数量", min_value=5, max_value=50, value=10, step=5)
+        # ⚡️ 核心升级：范围扩大到 300
+        max_results = st.number_input("数量 (Max 300)", min_value=5, max_value=300, value=20, step=10, help="注意：获取超过100篇可能需要较长时间")
         
     if st.button("🚀 搜索") and search_query:
-        with st.spinner(f"正在检索 ArXiv (Top {max_results})..."):
+        with st.spinner(f"正在深度检索 {max_results} 篇论文 (请耐心等待)..."):
             try:
-                search = arxiv.Search(query=search_query, max_results=max_results, sort_by=arxiv.SortCriterion.Relevance)
-                st.session_state.search_results = list(search.results())
-                st.success(f"找到 {len(st.session_state.search_results)} 篇相关论文")
+                # 增加了等待时间和结果处理的健壮性
+                search = arxiv.Search(
+                    query=search_query, 
+                    max_results=max_results, 
+                    sort_by=arxiv.SortCriterion.Relevance
+                )
+                results_list = list(search.results())
+                st.session_state.search_results = results_list
+                st.success(f"✅ 成功找到 {len(results_list)} 篇论文")
             except Exception as e:
-                st.error(f"搜索出错: {e}")
+                st.error(f"搜索中断 (可能是 ArXiv 响应慢): {e}")
                 
     if "search_results" in st.session_state:
-        for res in st.session_state.search_results:
-            with st.expander(f"📄 {res.title} ({res.published.year})"):
+        # 显示结果总数
+        total = len(st.session_state.search_results)
+        if total > 0:
+            st.caption(f"当前显示 {total} 条结果")
+        
+        for i, res in enumerate(st.session_state.search_results):
+            # 优化显示体验：加上序号
+            with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
                 st.write(f"**作者**: {', '.join([a.name for a in res.authors[:3]])}...")
                 st.write(f"**摘要**: {res.summary[:300]}...")
                 st.markdown(f"[原文链接]({res.entry_id})")
-                if st.button(f"⬇️ 下载并研读", key=res.entry_id):
+                if st.button(f"⬇️ 下载并研读", key=f"dl_{res.entry_id}_{i}"): # Key加上index防止冲突
                     if not user_api_key:
                         st.error("请先配置 API Key")
                     else:
@@ -302,10 +333,6 @@ with tab_chat:
                     except:
                         filter_dict = None
 
-                    # ⚡️ 核心升级 3：使用 MMR (Maximal Marginal Relevance) 算法
-                    # 作用：不仅要像（Relevance），还要多样（Marginal）。
-                    # fetch_k=20: 先找 20 个最像的
-                    # lambda_mult=0.6: 0.6的权重给相关性，0.4给多样性。防止 AI 总是引用同一段话。
                     docs = st.session_state.db.max_marginal_relevance_search(
                         prompt, 
                         k=search_k, 
@@ -332,7 +359,7 @@ with tab_chat:
 问题：{prompt}
 要求：
 1. 必须使用 $...$ 包裹数学公式。
-2. 尽可能引用多个不同片段的信息来回答，不要只盯着一段。
+2. 尽可能引用多个不同片段的信息来回答。
 3. 忽略参考文献列表。
 """
                     else:
