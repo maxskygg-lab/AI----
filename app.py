@@ -22,14 +22,24 @@ from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
-st.set_page_config(page_title="AI 深度研读助手 (Deep Search)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="AI 深度研读助手 (全信息版)", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
     .stButton>button {width: 100%; border-radius: 8px;}
     .reportview-container { margin-top: -2em; }
+    /* 优化摘要显示的字体和间距 */
+    .abstract-box {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 5px solid #4CAF50;
+        font-size: 0.95em;
+        line-height: 1.6;
+        margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
-st.title("📖 AI 深度研读助手 (Deep Search 版)")
+st.title("📖 AI 深度研读助手 (全信息版)")
 
 # ================= 3. 状态初始化 =================
 if "chat_history" not in st.session_state:
@@ -144,7 +154,6 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # 🗂️ 文件管理区域
     if st.session_state.loaded_files:
         st.subheader("🗂️ 文件管理")
         for file in list(st.session_state.loaded_files):
@@ -225,7 +234,6 @@ with st.sidebar:
                         generated_query = llm.invoke(prompt).content.strip().replace('"', '').replace("'", "")
                         st.session_state.suggested_query = generated_query
                         
-                        # 自动搜索
                         search = arxiv.Search(query=generated_query, max_results=20, sort_by=arxiv.SortCriterion.Relevance)
                         st.session_state.search_results = list(search.results())
                         st.success(f"已生成关键词：{generated_query}")
@@ -261,13 +269,11 @@ with tab_search:
         default_query = st.session_state.get("suggested_query", "")
         search_query = st.text_input("输入关键词", value=default_query, placeholder="支持布尔搜索: LLM AND Agent")
     with col2:
-        # ⚡️ 核心升级：范围扩大到 300
         max_results = st.number_input("数量 (Max 300)", min_value=5, max_value=300, value=20, step=10, help="注意：获取超过100篇可能需要较长时间")
         
     if st.button("🚀 搜索") and search_query:
         with st.spinner(f"正在深度检索 {max_results} 篇论文 (请耐心等待)..."):
             try:
-                # 增加了等待时间和结果处理的健壮性
                 search = arxiv.Search(
                     query=search_query, 
                     max_results=max_results, 
@@ -280,18 +286,27 @@ with tab_search:
                 st.error(f"搜索中断 (可能是 ArXiv 响应慢): {e}")
                 
     if "search_results" in st.session_state:
-        # 显示结果总数
         total = len(st.session_state.search_results)
         if total > 0:
             st.caption(f"当前显示 {total} 条结果")
         
         for i, res in enumerate(st.session_state.search_results):
-            # 优化显示体验：加上序号
             with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
-                st.write(f"**作者**: {', '.join([a.name for a in res.authors[:3]])}...")
-                st.write(f"**摘要**: {res.summary[:300]}...")
-                st.markdown(f"[原文链接]({res.entry_id})")
-                if st.button(f"⬇️ 下载并研读", key=f"dl_{res.entry_id}_{i}"): # Key加上index防止冲突
+                # 1. 完整作者
+                all_authors = ', '.join([a.name for a in res.authors])
+                st.markdown(f"**👨‍🏫 作者**: {all_authors}")
+                
+                # 2. 完整摘要 (使用 HTML 美化背景，增加可读性)
+                clean_summary = res.summary.replace('\n', ' ') # 去除奇怪的换行符
+                st.markdown(f"""
+                <div class="abstract-box">
+                    <b>📝 摘要：</b><br>
+                    {clean_summary}
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.markdown(f"[🔗 原文链接]({res.entry_id})")
+                if st.button(f"⬇️ 下载并研读", key=f"dl_{res.entry_id}_{i}"):
                     if not user_api_key:
                         st.error("请先配置 API Key")
                     else:
