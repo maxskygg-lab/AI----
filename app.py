@@ -227,17 +227,17 @@ with st.sidebar:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.5)
                         prompt = f"""
                         任务：你是一个专业的科研助理。根据以下论文片段，识别核心研究问题。
-                        目标：生成 1 个能在 ArXiv 获得高质量结果的英文搜索 Query。
+                        目标：生成 1 个能在 ArXiv 获得高质量、高相关性结果的搜索词组。
+                        要求：
+                        1. 只输出关键词，不要解释。
+                        2. 关键词应该是 2-3 个核心概念的组合。
                         片段：
                         {content_snippet[:2000]}
                         """
                         generated_query = llm.invoke(prompt).content.strip().replace('"', '').replace("'", "")
                         st.session_state.suggested_query = generated_query
-                        
-                        search = arxiv.Search(query=generated_query, max_results=20, sort_by=arxiv.SortCriterion.Relevance)
-                        st.session_state.search_results = list(search.results())
                         st.success(f"已生成关键词：{generated_query}")
-                        st.info("👈 请点击 '🔍 ArXiv 搜索' 查看。您现在可以手动调整搜索数量了！")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"挖掘失败: {e}")
 
@@ -267,37 +267,44 @@ with tab_search:
     col1, col2 = st.columns([4, 1])
     with col1:
         default_query = st.session_state.get("suggested_query", "")
-        search_query = st.text_input("输入关键词", value=default_query, placeholder="支持布尔搜索: LLM AND Agent")
+        search_query = st.text_input("输入关键词", value=default_query, placeholder="例如: education robot")
     with col2:
-        max_results = st.number_input("数量 (Max 300)", min_value=5, max_value=300, value=20, step=10, help="注意：获取超过100篇可能需要较长时间")
+        max_results = st.number_input("数量 (Max 300)", min_value=5, max_value=300, value=20, step=10)
         
     if st.button("🚀 搜索") and search_query:
-        with st.spinner(f"正在深度检索 {max_results} 篇论文 (请耐心等待)..."):
+        with st.spinner(f"正在深度检索 {max_results} 篇论文..."):
             try:
+                # --- 核心改进：自动优化 Query 相关性 ---
+                # 如果输入包含空格且没有引号，自动封装成布尔查询
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    words = search_query.split()
+                    # 构造 ti:题目 或 abs:摘要 必须同时包含这些词的查询
+                    refined_query = " AND ".join([f'(ti:{w} OR abs:{w})' for w in words])
+                else:
+                    refined_query = search_query
+
                 search = arxiv.Search(
-                    query=search_query, 
+                    query=refined_query, 
                     max_results=max_results, 
                     sort_by=arxiv.SortCriterion.Relevance
                 )
                 results_list = list(search.results())
                 st.session_state.search_results = results_list
-                st.success(f"✅ 成功找到 {len(results_list)} 篇论文")
+                st.success(f"✅ 已针对“{refined_query}”找到 {len(results_list)} 篇论文")
             except Exception as e:
-                st.error(f"搜索中断 (可能是 ArXiv 响应慢): {e}")
+                st.error(f"搜索失败: {e}")
                 
     if "search_results" in st.session_state:
         total = len(st.session_state.search_results)
         if total > 0:
-            st.caption(f"当前显示 {total} 条结果")
+            st.caption(f"当前显示 {total} 条高相关结果")
         
         for i, res in enumerate(st.session_state.search_results):
             with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
-                # 1. 完整作者
                 all_authors = ', '.join([a.name for a in res.authors])
                 st.markdown(f"**👨‍🏫 作者**: {all_authors}")
                 
-                # 2. 完整摘要 (使用 HTML 美化背景，增加可读性)
-                clean_summary = res.summary.replace('\n', ' ') # 去除奇怪的换行符
+                clean_summary = res.summary.replace('\n', ' ')
                 st.markdown(f"""
                 <div class="abstract-box">
                     <b>📝 摘要：</b><br>
@@ -340,12 +347,9 @@ with tab_chat:
             with st.chat_message("assistant"):
                 try:
                     search_k = 15 if "精读" in reading_mode else 8
-                    try:
-                        if selected_scope != "🌐 对比所有论文":
-                            filter_dict = {"source_paper": selected_scope} 
-                        else:
-                            filter_dict = None
-                    except:
+                    if selected_scope != "🌐 对比所有论文":
+                        filter_dict = {"source_paper": selected_scope} 
+                    else:
                         filter_dict = None
 
                     docs = st.session_state.db.max_marginal_relevance_search(
