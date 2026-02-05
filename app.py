@@ -5,7 +5,7 @@ import time
 import tempfile
 import arxiv
 
-# ================= 🏥 环境听诊器 =================
+# ================= 1. 环境听诊器 =================
 try:
     import zhipuai
     import langchain_community
@@ -27,7 +27,6 @@ st.markdown("""
 <style>
     .stButton>button {width: 100%; border-radius: 8px;}
     .reportview-container { margin-top: -2em; }
-    /* 优化摘要显示的字体和间距 */
     .abstract-box {
         background-color: #f0f2f6;
         padding: 15px;
@@ -54,6 +53,9 @@ if "suggested_query" not in st.session_state:
     st.session_state.suggested_query = ""
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
+# --- 修复 NameError 的关键点：初始化默认范围 ---
+if "selected_scope" not in st.session_state:
+    st.session_state.selected_scope = "🌐 对比所有论文"
 
 # ================= 4. 核心逻辑函数 =================
 
@@ -211,18 +213,19 @@ with st.sidebar:
                         st.error(f"生成失败: {e}")
 
         scope_options = ["🌐 对比所有论文"] + st.session_state.loaded_files
-        selected_scope = st.selectbox("👁️ 专注范围", scope_options)
+        # 将选择的结果存入 session_state 避免丢失
+        st.session_state.selected_scope = st.selectbox("👁️ 专注范围", scope_options)
         
-        if st.button(f"🔍 基于【{selected_scope[:5]}...】挖掘新论文"):
+        if st.button(f"🔍 基于【{st.session_state.selected_scope[:5]}...】挖掘新论文"):
             if not user_api_key:
                 st.error("请填入 API Key")
             else:
                 with st.spinner("🤖 AI 正在深度分析文本，提炼搜索词..."):
                     try:
-                        if selected_scope == "🌐 对比所有论文":
+                        if st.session_state.selected_scope == "🌐 对比所有论文":
                             docs = st.session_state.db.similarity_search("Abstract Future Work limitation", k=5)
                         else:
-                            docs = st.session_state.db.similarity_search("Abstract Introduction related work", k=4, filter={"source_paper": selected_scope})
+                            docs = st.session_state.db.similarity_search("Abstract Introduction related work", k=4, filter={"source_paper": st.session_state.selected_scope})
                         content_snippet = "\n".join([d.page_content for d in docs])
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.5)
                         prompt = f"""
@@ -274,11 +277,8 @@ with tab_search:
     if st.button("🚀 搜索") and search_query:
         with st.spinner(f"正在深度检索 {max_results} 篇论文..."):
             try:
-                # --- 核心改进：自动优化 Query 相关性 ---
-                # 如果输入包含空格且没有引号，自动封装成布尔查询
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     words = search_query.split()
-                    # 构造 ti:题目 或 abs:摘要 必须同时包含这些词的查询
                     refined_query = " AND ".join([f'(ti:{w} OR abs:{w})' for w in words])
                 else:
                     refined_query = search_query
@@ -327,7 +327,8 @@ with tab_search:
 
 with tab_chat:
     if st.session_state.loaded_files:
-        st.caption(f"📚 模式：{reading_mode} | 范围：{selected_scope}")
+        # 使用 st.session_state.selected_scope 替代局部变量，确保全局可用
+        st.caption(f"📚 模式：{reading_mode} | 范围：{st.session_state.selected_scope}")
 
     for msg in st.session_state.chat_history:
         if msg["role"] == "system_notice":
@@ -347,8 +348,11 @@ with tab_chat:
             with st.chat_message("assistant"):
                 try:
                     search_k = 15 if "精读" in reading_mode else 8
-                    if selected_scope != "🌐 对比所有论文":
-                        filter_dict = {"source_paper": selected_scope} 
+                    
+                    # 范围过滤逻辑也改为使用 session_state
+                    current_scope = st.session_state.get("selected_scope", "🌐 对比所有论文")
+                    if current_scope != "🌐 对比所有论文":
+                        filter_dict = {"source_paper": current_scope} 
                     else:
                         filter_dict = None
 
