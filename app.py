@@ -8,13 +8,13 @@ import requests
 import re
 from collections import Counter
 
-# ================= 1. 环境与依赖检查 =================
+# ================= 1. 环境自检 =================
 try:
     import zhipuai
     import langchain_community
     import fitz  # pymupdf
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}")
+    st.error(f"🚑 核心环境缺失 -> {e.name}。请执行: pip install zhipuai langchain_community pymupdf requests arxiv")
     st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -23,30 +23,34 @@ from langchain_community.embeddings import ZhipuAIEmbeddings
 from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# ================= 2. 页面美化与样式 =================
+# ================= 2. 页面配置与 CSS 样式表 (完整还原) =================
 st.set_page_config(page_title="AI 深度研读助手 (全功能终极版)", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
-    .stButton>button {width: 100%; border-radius: 8px;}
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
     .abstract-box {
-        background-color: #f8f9fa; padding: 18px; border-radius: 10px;
-        border-left: 5px solid #4CAF50; font-size: 0.95em; line-height: 1.7;
-        margin-bottom: 12px; color: #2c3e50;
+        background-color: #f1f3f5; padding: 20px; border-radius: 12px;
+        border-left: 6px solid #28a745; font-size: 0.98em; line-height: 1.8;
+        margin-bottom: 15px; color: #343a40; box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
     }
     .cite-badge {
-        background-color: #ff4b4b; color: white; padding: 3px 12px;
-        border-radius: 15px; font-size: 0.85em; font-weight: bold;
+        background-color: #dc3545; color: white; padding: 4px 14px;
+        border-radius: 20px; font-size: 0.85em; font-weight: bold;
     }
     .topic-tag {
-        display: inline-block; background-color: #e3f2fd; color: #1976d2;
-        padding: 4px 10px; border-radius: 4px; margin: 4px;
-        font-size: 0.85em; border: 1px solid #bbdefb;
+        display: inline-block; background-color: #e7f3ff; color: #007bff;
+        padding: 5px 12px; border-radius: 6px; margin: 5px;
+        font-size: 0.88em; border: 1px solid #cce5ff; font-weight: 500;
+    }
+    .metric-card {
+        background-color: white; padding: 15px; border-radius: 10px;
+        border: 1px solid #dee2e6; text-align: center; box-shadow: 1px 1px 3px rgba(0,0,0,0.05);
     }
 </style>
 """, unsafe_allow_html=True)
-st.title("📖 AI 深度研读助手 (全功能终极版)")
+st.title("📖 AI 深度研读助手 (全功能恢复版)")
 
-# ================= 3. 严格的状态初始化 =================
+# ================= 3. 全局状态初始化 =================
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "db" not in st.session_state: st.session_state.db = None
 if "loaded_files" not in st.session_state: st.session_state.loaded_files = []
@@ -58,217 +62,256 @@ if "selected_scope" not in st.session_state: st.session_state.selected_scope = "
 # ================= 4. 核心功能函数集 =================
 
 def fetch_citations(arxiv_id):
-    """接入 Semantic Scholar 引用流 (带异常处理)"""
+    """从 Semantic Scholar 实时调取引用量数据"""
     try:
         clean_id = arxiv_id.split('/')[-1].split('v')[0]
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
-        response = requests.get(api_url, timeout=4)
+        response = requests.get(api_url, timeout=5)
         if response.status_code == 200:
             return response.json().get('citationCount', 0)
-    except: pass
+    except Exception:
+        pass
     return 0
 
 def extract_top_topics(results):
-    """Google 式热点词提取逻辑"""
-    all_text = " ".join([f"{r['obj'].title} {r['obj'].summary}" for r in results])
+    """学术热点词分析 (Google 检索逻辑)"""
+    all_text = ""
+    for item in results:
+        res = item['obj']
+        all_text += f" {res.title} {res.summary}"
     words = re.findall(r'\b\w{5,}\b', all_text.lower())
-    stop_words = {'learning', 'robotics', 'education', 'research', 'paper', 'approach', 'system', 'based', 'using', 'results', 'study', 'performance', 'model'}
+    stop_words = {'learning', 'robotics', 'education', 'research', 'paper', 'approach', 'system', 'based', 'using', 'results', 'provide', 'model', 'analysis', 'method'}
     meaningful_words = [w for w in words if w not in stop_words]
     return Counter(meaningful_words).most_common(10)
 
 def fix_latex_errors(text):
-    """全量 Latex 修复逻辑，防止渲染失败"""
+    """深度修复 LaTeX 渲染标识问题"""
     if not text: return text
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
     return text
 
 def generate_html_report(chat_history):
-    """高阶 HTML 导出，保留 MathJax 与专业排版"""
+    """导出带 MathJax 渲染支持的专业 HTML 报告"""
     html = """<!DOCTYPE html><html><head><meta charset="UTF-8">
     <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, sans-serif; max-width: 800px; margin: 0 auto; padding: 40px; line-height: 1.6; color: #333; }
-        h1 { border-bottom: 3px solid #4CAF50; padding-bottom: 10px; color: #2e7d32; }
-        .message { margin-bottom: 25px; padding: 20px; border-radius: 12px; }
-        .user { background-color: #e3f2fd; border-left: 6px solid #2196F3; }
-        .assistant { background-color: #f1f8e9; border-left: 6px solid #4CAF50; }
-        .system { background-color: #fff3e0; border-left: 6px solid #ff9800; font-style: italic; }
-        .role { font-weight: bold; display: block; margin-bottom: 10px; text-transform: uppercase; font-size: 0.8em; color: #666; }
-    </style></head><body><h1>🎓 AI 深度研读笔记</h1><p>导出日期：""" + time.strftime('%Y-%m-%d %H:%M') + """</p>"""
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 0 auto; padding: 40px; line-height: 1.7; color: #333; background-color: #f9f9f9; }
+        h1 { color: #1b5e20; border-bottom: 3px solid #4caf50; padding-bottom: 12px; }
+        .message { margin-bottom: 30px; padding: 25px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .user { background-color: #e3f2fd; border-left: 8px solid #1976d2; }
+        .assistant { background-color: #f1f8e9; border-left: 8px solid #43a047; }
+        .system { background-color: #fff3e0; border-left: 8px solid #fb8c00; font-style: italic; color: #666; }
+        .role-title { font-weight: bold; display: block; margin-bottom: 12px; text-transform: uppercase; font-size: 0.85em; color: #555; }
+        pre { background: #eee; padding: 10px; border-radius: 5px; overflow-x: auto; }
+    </style></head><body><h1>🎓 AI 深度研读笔记报告</h1>"""
     for msg in chat_history:
-        role_label = "🧑‍💻 Me" if msg['role'] == 'user' else "🤖 AI Researcher" if msg['role'] == 'assistant' else "🔔 System"
-        content_html = msg['content'].replace('\n', '<br>')
-        html += f'<div class="message {msg["role"]}"><span class="role">{role_label}</span>{content_html}</div>'
+        role_label = "🧑‍💻 我" if msg['role'] == 'user' else "🤖 AI 研究员" if msg['role'] == 'assistant' else "🔔 系统系统通知"
+        content_formatted = msg['content'].replace('\n', '<br>')
+        html += f'<div class="message {msg["role"]}"><span class="role-title">{role_label}</span>{content_formatted}</div>'
     html += "</body></html>"
     return html
 
 def rebuild_index_from_chunks(api_key):
-    """删除文件后物理重构 FAISS"""
+    """物理删除文档后重构向量索引 (含 Batch 保护)"""
     if not st.session_state.all_chunks:
         st.session_state.db = None
         return
     embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
-    st.session_state.db = FAISS.from_documents(st.session_state.all_chunks, embeddings)
+    chunks = st.session_state.all_chunks
+    batch_size = 32
+    st.session_state.db = FAISS.from_documents(chunks[:batch_size], embeddings)
+    for i in range(batch_size, len(chunks), batch_size):
+        st.session_state.db.add_documents(chunks[i:i+batch_size])
+        time.sleep(0.1)
 
 def process_and_add_to_db(file_path, file_name, api_key):
-    """全信息解析逻辑"""
+    """解析 PDF 并执行分批次向量化 (彻底修复 1214 错误)"""
     try:
         loader = PyPDFLoader(file_path)
         docs = loader.load()
-        for doc in docs: doc.metadata['source_paper'] = file_name
-        splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=200, separators=["\n\n", "\n", "。", ".", " ", ""])
-        chunks = splitter.split_documents(docs)
-        valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
-        st.session_state.all_chunks.extend(valid_chunks)
+        for doc in docs:
+            doc.metadata['source_paper'] = file_name
+        
+        splitter = RecursiveCharacterTextSplitter(chunk_size=750, chunk_overlap=200, separators=["\n\n", "\n", "。", ".", " ", ""])
+        new_chunks = splitter.split_documents(docs)
+        valid_new = [c for c in new_chunks if len(c.page_content.strip()) > 30]
+        
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
-        if st.session_state.db is None:
-            st.session_state.db = FAISS.from_documents(valid_chunks, embeddings)
-        else:
-            st.session_state.db.add_documents(valid_chunks)
+        
+        # --- 分批处理核心逻辑 ---
+        batch_size = 32
+        total_len = len(valid_new)
+        with st.spinner(f"正在向量化《{file_name}》，共 {total_len} 个片段，分批上传中..."):
+            if st.session_state.db is None:
+                st.session_state.db = FAISS.from_documents(valid_new[:batch_size], embeddings)
+                current_start = batch_size
+            else:
+                current_start = 0
+            
+            for i in range(current_start, total_len, batch_size):
+                batch_data = valid_new[i : i + batch_size]
+                st.session_state.db.add_documents(batch_data)
+                time.sleep(0.2) # 防止 API 频率限制
+        
+        st.session_state.all_chunks.extend(valid_new)
         if file_name not in st.session_state.loaded_files:
             st.session_state.loaded_files.append(file_name)
-        st.session_state.chat_history.append({"role": "system_notice", "content": f"📚 **通知**：已成功解析并加载《{file_name}》"})
-    except Exception as e: st.error(f"解析失败: {e}")
+        st.session_state.chat_history.append({"role": "system_notice", "content": f"📚 **库更新**：成功加载并索引文档《{file_name}》"})
+    except Exception as e:
+        st.error(f"解析失败: {str(e)}")
 
-# ================= 5. 侧边栏：多功能控制台 =================
+# ================= 5. 侧边栏：控制面板 (完整还原功能) =================
 with st.sidebar:
-    st.header("🎛️ 科研控制面板")
-    user_api_key = st.text_input("智谱 API Key", type="password")
+    st.header("🎛️ 科研工作台")
+    user_api_key = st.text_input("智谱 API Key", type="password", help="请填写 GLM-4 有效 Key")
     st.markdown("---")
     
     if st.session_state.loaded_files:
-        st.subheader("🗂️ 文献库")
+        st.subheader("🗂️ 文献库管理")
         for file in list(st.session_state.loaded_files):
-            c1, c2 = st.columns([4, 1])
-            with c1: st.caption(f"📄 {file[:22]}...")
-            with c2:
+            col_f, col_d = st.columns([4, 1])
+            with col_f: st.caption(f"📄 {file[:25]}...")
+            with col_d:
                 if st.button("🗑️", key=f"del_{file}"):
                     st.session_state.loaded_files.remove(file)
                     st.session_state.all_chunks = [c for c in st.session_state.all_chunks if c.metadata.get('source_paper') != file]
                     if user_api_key: rebuild_index_from_chunks(user_api_key)
                     st.rerun()
 
-        # --- 补全功能 1: 一键生成综述对比表 ---
+        st.markdown("---")
+        # 核心功能 1: 综述对比表
         if st.button("🪄 一键生成综述对比表", type="primary"):
             if user_api_key and st.session_state.db:
-                with st.spinner("AI 正在扫描全库进行横向对比..."):
+                with st.spinner("横向扫描文献中..."):
                     llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
-                    aggregated_ctx = ""
-                    for name in st.session_state.loaded_files:
-                        sub = st.session_state.db.similarity_search("Abstract method contribution", k=3, filter={"source_paper": name})
-                        aggregated_ctx += f"\n[Paper: {name}]\n" + "\n".join([d.page_content for d in sub])
-                    res = llm.invoke(f"分析以下论文片段，生成 Markdown 对比表格(列：论文名|核心创新|方法论|主要结论)：\n{aggregated_ctx}")
-                    st.session_state.chat_history.append({"role": "assistant", "content": res.content})
+                    comparison_ctx = ""
+                    for paper in st.session_state.loaded_files:
+                        top_sub = st.session_state.db.similarity_search("Abstract methodology contribution", k=3, filter={"source_paper": paper})
+                        comparison_ctx += f"\n[文章: {paper}]\n" + "\n".join([d.page_content for d in top_sub])
+                    prompt = f"对比以下科研文献，生成一个 Markdown 表格，包含：论文名、核心创新点、主要方法、研究局限。内容如下：\n{comparison_ctx}"
+                    response = llm.invoke(prompt)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response.content})
                     st.rerun()
 
         st.markdown("---")
-        st.session_state.selected_scope = st.selectbox("👁️ 研读专注范围", ["🌐 对比所有论文"] + st.session_state.loaded_files)
+        st.session_state.selected_scope = st.selectbox("👁️ 对话专注范围", ["🌐 对比所有论文"] + st.session_state.loaded_files)
 
-        # --- 补全功能 2: 深度挖掘新关键词 ---
-        if st.button(f"🔍 挖掘【{st.session_state.selected_scope[:5]}...】关联论文"):
+        # 核心功能 2: 挖掘关联论文
+        if st.button(f"🔍 挖掘【{st.session_state.selected_scope[:6]}】关联词"):
             if user_api_key and st.session_state.db:
-                with st.spinner("挖掘文本深层特征中..."):
+                with st.spinner("AI 深度特征提炼中..."):
                     scope = st.session_state.selected_scope
                     f_dict = {"source_paper": scope} if scope != "🌐 对比所有论文" else None
-                    docs = st.session_state.db.similarity_search("Introduction future work", k=4, filter=f_dict)
+                    key_docs = st.session_state.db.similarity_search("Introduction future work research gap", k=4, filter=f_dict)
                     llm = ChatZhipuAI(model="glm-4", api_key=user_api_key)
-                    prompt = f"基于以下论文片段，提炼 2 个最能代表其研究深度的英文学术搜索词组(只输出词组)：\n" + "\n".join([d.page_content for d in docs])
-                    st.session_state.suggested_query = llm.invoke(prompt).content.strip()
+                    prompt = f"基于以下文本片段，提炼 2 个最精准的英文学术搜索词组，用于进一步检索相关文献（只输出词组）：\n" + "\n".join([d.page_content for d in key_docs])
+                    new_q = llm.invoke(prompt).content.strip()
+                    st.session_state.suggested_query = new_q
                     st.success(f"新搜索词已生成！")
                     st.rerun()
 
     st.markdown("---")
-    st.subheader("📝 导出与导入")
     if st.session_state.chat_history:
-        st.download_button("💾 导出研读笔记 HTML", generate_html_report(st.session_state.chat_history), "research_notes.html", "text/html")
+        st.download_button("💾 下载研读报告 (HTML)", generate_html_report(st.session_state.chat_history), "study_report.html", "text/html")
     
-    uploaded_file = st.file_uploader("导入本地 PDF", type="pdf")
-    if uploaded_file and user_api_key and st.button("确认识别并分析"):
+    st.subheader("📥 导入本地文献")
+    uploaded_pdf = st.file_uploader("上传 PDF 论文", type="pdf")
+    if uploaded_pdf and user_api_key and st.button("开始解析"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(uploaded_file.getvalue())
-            process_and_add_to_db(tmp.name, uploaded_file.name, user_api_key)
+            tmp.write(uploaded_pdf.getvalue())
+            process_and_add_to_db(tmp.name, uploaded_pdf.name, user_api_key)
             os.remove(tmp.name)
             st.rerun()
 
-# ================= 6. 主界面：调研与对话 =================
-tab_search, tab_chat = st.tabs(["🔍 文献调研 (Google 逻辑增强)", "💬 深度研读空间"])
+# ================= 6. 主界面 =================
+tab_search, tab_chat = st.tabs(["🔍 文献调研引擎 (Google Logic)", "💬 深度研读对话"])
 
 with tab_search:
-    st.subheader("🌍 学术大数据挖掘引擎")
+    st.subheader("🌍 学术大数据联合调研")
     col_q, col_s, col_n = st.columns([3, 1.2, 0.8])
     with col_q:
-        search_q = st.text_input("关键词/挖掘词", value=st.session_state.suggested_query, placeholder="如: education robot K-12")
+        input_q = st.text_input("关键词/挖掘词", value=st.session_state.suggested_query, placeholder="例如: robotics education human-robot interaction")
     with col_s:
-        sort_mode = st.selectbox("Google 排序权重", ["🔥 相关性优先", "📅 最新发表", "📈 引用量之王"])
+        sort_mode = st.selectbox("排序逻辑", ["🔥 相关性优先", "📅 时间最新", "📈 引用量之王"])
     with col_n:
-        max_n = st.number_input("获取数量", 5, 50, 15)
+        n_results = st.number_input("篇数", 5, 50, 15)
 
-    if st.button("🚀 执行多维检索") and search_q:
-        with st.spinner("同步 ArXiv 与 Semantic Scholar 数据中..."):
+    if st.button("🚀 启动深度检索") and input_q:
+        with st.spinner("正在检索并同步 Citation 数据..."):
             try:
                 arxiv_sort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
-                # 自动布尔优化
-                final_q = search_q if ("AND" in search_q) else " AND ".join([f"(ti:{w} OR abs:{w})" for w in search_q.split()])
-                search = arxiv.Search(query=final_q, max_results=max_n, sort_by=arxiv_sort)
+                if "时间" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
+                
+                # 布尔检索优化
+                processed_q = input_q if ("AND" in input_q) else " AND ".join([f"(ti:{w} OR abs:{w})" for w in input_q.split()])
+                search_client = arxiv.Search(query=processed_q, max_results=n_results, sort_by=arxiv_sort)
                 results_with_meta = []
-                for res in list(search.results()):
+                for res in list(search_client.results()):
                     results_with_meta.append({'obj': res, 'citations': fetch_citations(res.entry_id)})
-                    time.sleep(0.1) # 频率保护
-                if "引用量" in sort_mode: results_with_meta.sort(key=lambda x: x['citations'], reverse=True)
+                    time.sleep(0.1)
+                
+                if "引用量" in sort_mode:
+                    results_with_meta.sort(key=lambda x: x['citations'], reverse=True)
                 st.session_state.search_results = results_with_meta
-            except Exception as e: st.error(f"检索失败: {e}")
+            except Exception as e:
+                st.error(f"检索出错: {e}")
 
     if st.session_state.search_results:
-        # --- 补全功能 3: 领域热点关键词分布 ---
+        # 补全功能 3: 领域关键词热度分布
         topics = extract_top_topics(st.session_state.search_results)
-        st.write("📊 **调研热点图谱分析** (协助快速扫盲):")
-        t_cols = st.columns(len(topics))
+        st.write("📊 **当前调研热点统计** (有助于识别研究偏向):")
+        topic_cols = st.columns(len(topics))
         for i, (word, count) in enumerate(topics):
-            t_cols[i].markdown(f"<div class='topic-tag'>{word} ({count})</div>", unsafe_allow_html=True)
+            topic_cols[i].markdown(f"<div class='topic-tag'>{word} ({count})</div>", unsafe_allow_html=True)
         
         st.markdown("---")
         for i, item in enumerate(st.session_state.search_results):
             res, cites = item['obj'], item['citations']
-            is_match = all(w.lower() in res.title.lower() for w in search_q.split()[:1])
-            with st.expander(f"{'🎯' if is_match else '📄'} #{i+1} [{cites} Cites] {res.title} ({res.published.year})"):
-                st.markdown(f"<div class='abstract-box'><b>Abstract:</b><br>{res.summary.replace(chr(10), ' ')}</div>", unsafe_allow_html=True)
+            is_precise = any(w.lower() in res.title.lower() for w in input_q.split()[:1])
+            with st.expander(f"{'🎯' if is_precise else '📄'} #{i+1} [{cites} 引用] {res.title} ({res.published.year})"):
+                clean_abs = res.summary.replace('\n', ' ')
+                st.markdown(f"<div class='abstract-box'><b>Abstract:</b><br>{clean_abs}</div>", unsafe_allow_html=True)
                 col1, col2 = st.columns([1, 1])
-                with col1: st.markdown(f"[🔗 ArXiv 链接]({res.entry_id})")
+                with col1: st.markdown(f"[🔗 ArXiv 地址]({res.entry_id})")
                 with col2:
-                    if st.button(f"⬇️ 加入我的研读库", key=f"dl_final_{i}"):
+                    if st.button(f"⬇️ 下载并研读此篇", key=f"dl_btn_{i}"):
                         if user_api_key:
-                            with st.spinner("正在同步至向量索引..."):
-                                path = res.download_pdf(dirpath=tempfile.gettempdir())
-                                process_and_add_to_db(path, res.title, user_api_key)
-                                st.success("已完成！转到‘研读空间’对话")
+                            with st.spinner("正在分批索引..."):
+                                pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
+                                process_and_add_to_db(pdf_path, res.title, user_api_key)
+                                st.success("已完成！")
                         else: st.error("请先在侧边栏填写 API Key")
 
 with tab_chat:
     if st.session_state.loaded_files:
-        st.caption(f"📚 模式: {reading_mode} | 范围: {st.session_state.selected_scope}")
+        st.caption(f"📚 研读范围: {st.session_state.selected_scope}")
         for msg in st.session_state.chat_history:
             if msg["role"] == "system_notice": st.info(msg["content"])
             else:
                 with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        if prompt := st.chat_input("输入科研问题..."):
+        if prompt := st.chat_input("针对选中论文进行深度提问..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.write(prompt)
             with st.chat_message("assistant"):
                 try:
                     scope = st.session_state.selected_scope
                     f_dict = {"source_paper": scope} if scope != "🌐 对比所有论文" else None
-                    # 恢复多样性 MMR 检索逻辑
-                    docs = st.session_state.db.max_marginal_relevance_search(prompt, k=8, fetch_k=20, lambda_mult=0.7, filter=f_dict)
-                    context = "\n\n".join([f"📄【{d.metadata.get('source_paper','?')} P{d.metadata.get('page',0)+1}】:\n{d.page_content}" for d in docs])
-                    llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
-                    res = llm.invoke(f"你是科研导师。基于资料回答：\n{context}\n\n问题：{prompt}\n要求：数学公式用 $ 包裹。")
-                    ans = fix_latex_errors(res.content)
-                    st.write(ans)
-                    st.session_state.chat_history.append({"role": "assistant", "content": ans})
-                except Exception as e: st.error(f"生成失败: {e}")
+                    # MMR 检索逻辑补全
+                    search_docs = st.session_state.db.max_marginal_relevance_search(
+                        prompt, k=7, fetch_k=20, lambda_mult=0.75, filter=f_dict
+                    )
+                    context_str = "\n\n".join([f"📄【{d.metadata.get('source_paper','?')} P{d.metadata.get('page',0)+1}】:\n{d.page_content}" for d in search_docs])
+                    
+                    llm_chat = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                    full_prompt = f"你是资深科研专家。基于以下论文资料回答：\n{context_str}\n\n问题：{prompt}\n要求：严谨引用，数学公式务必用 $ 包裹。"
+                    ans_res = llm_chat.invoke(full_prompt)
+                    final_ans = fix_latex_errors(ans_res.content)
+                    st.write(final_ans)
+                    st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
+                except Exception as e:
+                    st.error(f"生成失败: {e}")
     else:
-        st.info("💡 库中暂无论文。请在左侧上传或通过调研引擎‘下载’论文。")
+        st.info("💡 研读库为空。请先通过检索下载论文，或手动上传 PDF 文件。")
