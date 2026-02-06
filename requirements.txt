@@ -9,3 +9,4 @@ faiss-cpu
 pypdf
 httpx
 sniffio
+requests
