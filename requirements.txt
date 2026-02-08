@@ -10,3 +10,4 @@ pypdf
 httpx
 sniffio
 requests
+streamlit_agraph
