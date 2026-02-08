@@ -5,6 +5,7 @@ import time
 import tempfile
 import arxiv
 import requests  # 新增：用于调用 Semantic Scholar API
+from streamlit_agraph import agraph, Node, Edge, Config # 新增：图谱库
 
 # ================= 1. 环境听诊器 =================
 try:
@@ -64,13 +65,14 @@ if "search_results" not in st.session_state:
     st.session_state.search_results = []
 if "selected_scope" not in st.session_state:
     st.session_state.selected_scope = "🌐 对比所有论文"
+if "focus_paper_id" not in st.session_state: # 新增：用于跟踪图谱展示
+    st.session_state.focus_paper_id = None
 
 # ================= 4. 核心逻辑函数 =================
 
 def fetch_citations(arxiv_id):
     """从 Semantic Scholar API 获取引用数"""
     try:
-        # ArXiv ID 格式处理：去除版本号
         clean_id = arxiv_id.split('/')[-1].split('v')[0]
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount,title,year"
         response = requests.get(api_url, timeout=5)
@@ -79,6 +81,37 @@ def fetch_citations(arxiv_id):
     except:
         pass
     return 0
+
+# --- 新增图谱数据获取函数 ---
+def fetch_graph_data(arxiv_id):
+    try:
+        clean_id = arxiv_id.split('/')[-1].split('v')[0]
+        fields = "title,year,references,citations"
+        api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
+        response = requests.get(api_url, timeout=8)
+        if response.status_code == 200: return response.json()
+    except: pass
+    return None
+
+# --- 新增图谱渲染函数 ---
+def render_connected_graph(data):
+    if not data: return st.warning("无法获取关联数据")
+    nodes, edges = [], []
+    # 中心节点
+    nodes.append(Node(id="root", label="Seed Paper", size=25, color="#FF4B4B"))
+    # 被引 (Citations)
+    for i, item in enumerate(data.get('citations', [])[:10]):
+        nid = f"c_{i}"
+        nodes.append(Node(id=nid, label=item.get('title','')[:20], size=15, color="#2ca02c"))
+        edges.append(Edge(source=nid, target="root"))
+    # 引用 (References)
+    for i, item in enumerate(data.get('references', [])[:10]):
+        nid = f"r_{i}"
+        nodes.append(Node(id=nid, label=item.get('title','')[:20], size=15, color="#1f77b4"))
+        edges.append(Edge(source="root", target=nid))
+    
+    config = Config(width=1000, height=450, directed=True, physics=True)
+    return agraph(nodes=nodes, edges=edges, config=config)
 
 def fix_latex_errors(text):
     if not text: return text
@@ -254,6 +287,22 @@ with tab_search:
                 st.error(f"检索失败: {e}")
                 
     if st.session_state.search_results:
+        # 新增图谱显示区域
+        if st.session_state.focus_paper_id:
+            st.markdown("---")
+            st.subheader("📊 文献关联图谱 (Connected Graph)")
+            col_graph, col_info = st.columns([3, 1])
+            with col_graph:
+                g_data = fetch_graph_data(st.session_state.focus_paper_id)
+                render_connected_graph(g_data)
+            with col_info:
+                st.caption("🟢 绿色: Citations (引用本文)")
+                st.caption("🔵 蓝色: References (参考文献)")
+                if st.button("❌ 关闭图谱"):
+                    st.session_state.focus_paper_id = None
+                    st.rerun()
+            st.markdown("---")
+
         for i, item in enumerate(st.session_state.search_results):
             res = item['obj']
             cites = item['citations']
@@ -263,10 +312,10 @@ with tab_search:
                 
                 st.markdown(f'<div class="abstract-box"><b>📝 摘要：</b><br>{res.summary.replace("\n", " ")}</div>', unsafe_allow_html=True)
                 
-                col1, col2 = st.columns([1, 1])
+                col1, col2, col3 = st.columns([1, 1, 1])
                 with col1: st.markdown(f"[🔗 ArXiv 原文]({res.entry_id})")
                 with col2:
-                    if st.button(f"⬇️ 下载并分析", key=f"dl_search_{i}"):
+                    if st.button(f"⬇️ 下载分析", key=f"dl_search_{i}"):
                         if user_api_key:
                             with st.spinner("下载解析中..."):
                                 try:
@@ -275,6 +324,10 @@ with tab_search:
                                     st.success("入库成功！")
                                 except Exception as e: st.error(f"失败: {e}")
                         else: st.error("请填入 API Key")
+                with col3:
+                    if st.button(f"🕸️ 关联图谱", key=f"btn_graph_{i}"):
+                        st.session_state.focus_paper_id = res.entry_id
+                        st.rerun()
 
 with tab_chat:
     if st.session_state.loaded_files:
