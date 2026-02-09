@@ -5,7 +5,7 @@ import time
 import tempfile
 import arxiv
 import requests
-import math  # 新增：用于计算节点大小
+import math
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # ================= 1. 环境听诊器 =================
@@ -47,6 +47,14 @@ st.markdown("""
         font-size: 0.8em;
         font-weight: bold;
     }
+    .detail-panel {
+        background-color: #ffffff;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #ddd;
+        height: 600px;
+        overflow-y: auto;
+    }
 </style>
 """, unsafe_allow_html=True)
 st.title("📖 AI 深度研读助手 (专业调研版)")
@@ -83,38 +91,40 @@ def fetch_citations(arxiv_id):
         pass
     return 0
 
+@st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id):
-    """获取关联数据，增加字段以支撑 Connected Papers 效果"""
+    """获取关联数据，增加 abstract 字段并开启缓存"""
     try:
         clean_id = arxiv_id.split('/')[-1].split('v')[0]
-        # 增加 citationCount 以计算节点大小
-        fields = "title,year,citationCount,references.title,references.citationCount,references.year,citations.title,citations.citationCount,citations.year"
+        # 增加 abstract 和 paperId 字段以支撑详情显示
+        fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
         response = requests.get(api_url, timeout=8)
         if response.status_code == 200: return response.json()
     except: pass
     return None
 
-# --- 重构后的图谱渲染函数 (保持 Connected Papers 逻辑) ---
 def render_connected_graph(data):
+    """增强版：返回点击 ID 和 详情字典"""
     if not data: 
-        return st.warning("⚠️ 无法获取关联数据")
+        return None, {}
     
     nodes, edges = [], []
+    paper_details = {} 
     
     # 1. 中心种子节点
-    seed_id = "root"
+    seed_id = data.get('paperId', 'root')
     seed_title = data.get('title', 'Seed Paper')
-    seed_cites = data.get('citationCount', 0)
-    nodes.append(Node(
-        id=seed_id, 
-        label=f"⭐ {seed_title[:25]}...", 
-        size=35, 
-        color="#FF4B4B"
-    ))
+    paper_details[seed_id] = {
+        "title": seed_title,
+        "abstract": data.get('abstract', '无摘要信息'),
+        "year": data.get('year', 'Unknown'),
+        "cites": data.get('citationCount', 0)
+    }
+    nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
 
     # 2. 数据去重处理
-    seen_ids = set()
+    seen_ids = set([seed_id])
     ref_list = data.get('references', [])[:12]
     cite_list = data.get('citations', [])[:12]
     
@@ -128,37 +138,33 @@ def render_connected_graph(data):
         if pid and pid not in seen_ids:
             p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
 
-    # 3. 构建节点（基于引用量和年份）
+    # 3. 构建节点
     for item in combined:
         p_id = item.get('paperId')
         title = item.get('title', 'Unknown')
         year = item.get('year') or 2020
         cites = item.get('citationCount', 0)
         
-        # 节点大小：对数缩放
-        node_size = 12 + (math.log2(cites + 1) * 4)
-        
-        # 颜色：年份区分
-        if year >= 2024: color = "#10b981"   # 极新 (绿色)
-        elif year >= 2021: color = "#3b82f6" # 近期 (蓝色)
-        else: color = "#94a3b8"              # 早期 (灰色)
+        paper_details[p_id] = {
+            "title": title,
+            "abstract": item.get('abstract', '该文献暂未提供摘要'),
+            "year": year,
+            "cites": cites
+        }
 
-        nodes.append(Node(
-            id=p_id, 
-            label=f"{title[:18]}..({year})", 
-            size=node_size, 
-            color=color,
-            title=f"Citations: {cites} | Year: {year}"
-        ))
+        node_size = 12 + (math.log2(cites + 1) * 4)
+        color = "#10b981" if year >= 2024 else ("#3b82f6" if year >= 2021 else "#94a3b8")
+
+        nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=color))
         
-        # 连线
         if item['rel_type'] == 'cite':
             edges.append(Edge(source=p_id, target=seed_id, color="#10b981", width=2))
         else:
             edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=2))
 
-    config = Config(width="100%", height=500, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
-    return agraph(nodes=nodes, edges=edges, config=config)
+    config = Config(width="100%", height=600, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
+    clicked_id = agraph(nodes=nodes, edges=edges, config=config)
+    return clicked_id, paper_details
 
 def fix_latex_errors(text):
     if not text: return text
@@ -180,11 +186,7 @@ def process_and_add_to_db(file_path, file_name, api_key):
         for doc in docs:
             doc.metadata['source_paper'] = file_name
         
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,       
-            chunk_overlap=200,    
-            separators=["\n\n", "\n", "。", ".", " ", ""]
-        )
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=200, separators=["\n\n", "\n", "。", ".", " ", ""])
         chunks = splitter.split_documents(docs)
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
         
@@ -206,11 +208,7 @@ def process_and_add_to_db(file_path, file_name, api_key):
         
         if file_name not in st.session_state.loaded_files:
             st.session_state.loaded_files.append(file_name)
-        
-        st.session_state.chat_history.append({
-            "role": "system_notice",
-            "content": f"📚 **系统通知**：已加载《{file_name}》。"
-        })
+        st.session_state.chat_history.append({"role": "system_notice", "content": f"📚 **系统通知**：已加载《{file_name}》。"})
     except Exception as e:
         st.error(f"处理失败: {e}")
 
@@ -315,19 +313,28 @@ with tab_search:
         if st.session_state.focus_paper_id:
             st.markdown("---")
             st.subheader("📊 文献关联图谱 (Connected Graph)")
-            col_graph, col_info = st.columns([3, 1])
-            with col_graph:
-                g_data = fetch_graph_data(st.session_state.focus_paper_id)
-                render_connected_graph(g_data)
-            with col_info:
-                st.markdown("**图谱指南**")
-                st.caption("🔴 中心：您的种子论文")
-                st.caption("🟢 绿色节点：引用本文的文献")
-                st.caption("🔵 蓝色节点：本文引用的参考文献")
-                st.caption("📏 大小：表示该文献的总引用量")
-                if st.button("❌ 关闭图谱"):
-                    st.session_state.focus_paper_id = None
-                    st.rerun()
+            
+            g_data = fetch_graph_data(st.session_state.focus_paper_id)
+            if not g_data:
+                st.warning("⚠️ 无法获取图谱数据。请稍后再试或检查 API 频率。")
+            else:
+                col_graph, col_info = st.columns([2.5, 1])
+                with col_graph:
+                    clicked_node_id, all_details = render_connected_graph(g_data)
+                
+                with col_info:
+                    if clicked_node_id and clicked_node_id in all_details:
+                        info = all_details[clicked_node_id]
+                        st.markdown(f"### 📄 详情")
+                        st.markdown(f"**标题**: {info['title']}")
+                        st.markdown(f"**年份**: {info['year']} | **引用**: {info['cites']}")
+                        st.markdown("---")
+                        st.markdown(f"**摘要**: \n\n {info['abstract']}")
+                    else:
+                        st.info("💡 **操作提示**\n\n点击图谱圆点查看摘要。绿色为引用本文的文献，蓝色为本文引用的文献。")
+                        if st.button("❌ 关闭图谱"):
+                            st.session_state.focus_paper_id = None
+                            st.rerun()
             st.markdown("---")
 
         for i, item in enumerate(st.session_state.search_results):
@@ -358,12 +365,10 @@ with tab_search:
 with tab_chat:
     if st.session_state.loaded_files:
         st.caption(f"📚 模式：{reading_mode} | 范围：{st.session_state.selected_scope}")
-
     for msg in st.session_state.chat_history:
         if msg["role"] == "system_notice": st.info(msg["content"])
         else:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
-
     if prompt := st.chat_input("输入问题..."):
         if not st.session_state.db: st.warning("🧠 请先添加论文")
         else:
@@ -374,7 +379,6 @@ with tab_chat:
                     search_k = 15 if "精读" in reading_mode else 8
                     current_scope = st.session_state.get("selected_scope", "🌐 对比所有论文")
                     filter_dict = {"source_paper": current_scope} if current_scope != "🌐 对比所有论文" else None
-
                     docs = st.session_state.db.max_marginal_relevance_search(prompt, k=search_k, fetch_k=20, lambda_mult=0.6, filter=filter_dict)
                     if not docs: st.warning("未找到相关内容。")
                     else:
