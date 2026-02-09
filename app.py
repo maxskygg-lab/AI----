@@ -39,7 +39,6 @@ st.markdown("""
         font-size: 0.95em;
         line-height: 1.6;
         margin-bottom: 10px;
-        color: #31333F;
     }
     .cite-badge {
         background-color: #ff4b4b;
@@ -89,11 +88,16 @@ def get_pure_arxiv_id(url):
     return url.split('/')[-1].split('v')[0]
 
 def fetch_citations(arxiv_id, ss_key=None):
-    """从 Semantic Scholar API 获取引用数"""
+    """获取引用数 (带匿名限速保护)"""
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
         headers = {"x-api-key": ss_key} if ss_key else {}
+        
+        # 匿名用户限速保护
+        if not ss_key:
+            time.sleep(0.5) 
+            
         response = requests.get(api_url, headers=headers, timeout=5)
         if response.status_code == 200:
             return response.json().get('citationCount', 0)
@@ -103,26 +107,41 @@ def fetch_citations(arxiv_id, ss_key=None):
 
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
-    """获取关联数据（严格注入子级摘要字段）"""
-    try:
-        clean_id = get_pure_arxiv_id(arxiv_id)
-        fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
-        api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
-        headers = {"x-api-key": ss_key} if ss_key else {}
-        
-        if not ss_key:
-            time.sleep(1.5)
+    """获取图谱数据 (支持指数退避重试)"""
+    clean_id = get_pure_arxiv_id(arxiv_id)
+    fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
+    api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
+    headers = {"x-api-key": ss_key} if ss_key else {}
+    
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            # 匿名用户请求前置延迟
+            if not ss_key:
+                time.sleep(1.5 * (attempt + 1)) 
             
-        response = requests.get(api_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        st.error(f"图谱数据抓取失败: {e}")
-        return None
+            response = requests.get(api_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                if attempt < max_retries:
+                    st.warning(f"⏳ 触发限流，正在进行第 {attempt+1} 次重试...")
+                    continue
+                else:
+                    st.error("🚫 达到 API 最大重试次数。请稍后再试或等待 Key 审批。")
+            elif response.status_code == 403:
+                st.error("🔑 API Key 校验失败，请检查填写。")
+                return None
+            else:
+                return None
+        except Exception as e:
+            if attempt == max_retries:
+                st.error(f"图谱获取失败: {e}")
+    return None
 
 def render_connected_graph(data):
-    """渲染图谱逻辑"""
+    """增强版图谱渲染"""
     if not data: 
         return None, {}
     
@@ -139,32 +158,41 @@ def render_connected_graph(data):
     }
     nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
 
-    seen_ids = {seed_id}
-    for rel_type in ['references', 'citations']:
-        items = data.get(rel_type, [])[:15]
-        for p in items:
-            p_id = p.get('paperId')
-            if not p_id or p_id in seen_ids:
-                continue
-            seen_ids.add(p_id)
-            
-            title = p.get('title', 'Unknown')
-            paper_details[p_id] = {
-                "title": title,
-                "abstract": p.get('abstract', '该关联文献暂无详细摘要。'),
-                "year": p.get('year', 'Unknown'),
-                "cites": p.get('citationCount', 0)
-            }
-            
-            c_count = p.get('citationCount', 0)
-            node_size = 12 + (math.log2(c_count + 1) * 4)
-            node_color = "#3b82f6" if rel_type == 'references' else "#10b981"
-            
-            nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=node_color))
-            if rel_type == 'references':
-                edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=1))
-            else:
-                edges.append(Edge(source=p_id, target=seed_id, color="#10b981", width=1))
+    seen_ids = set([seed_id])
+    ref_list = data.get('references', [])[:12]
+    cite_list = data.get('citations', [])[:12]
+    
+    combined = []
+    for p in ref_list:
+        pid = p.get('paperId')
+        if pid and pid not in seen_ids:
+            p['rel_type'] = 'ref'; combined.append(p); seen_ids.add(pid)
+    for p in cite_list:
+        pid = p.get('paperId')
+        if pid and pid not in seen_ids:
+            p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
+
+    for item in combined:
+        p_id = item.get('paperId')
+        title = item.get('title', 'Unknown')
+        year = item.get('year') or 2020
+        cites = item.get('citationCount', 0)
+        
+        paper_details[p_id] = {
+            "title": title,
+            "abstract": item.get('abstract', '详情请查看 ArXiv 或 Semantic Scholar 页面。'),
+            "year": year,
+            "cites": cites
+        }
+
+        node_size = 12 + (math.log2(cites + 1) * 4)
+        color = "#10b981" if year >= 2024 else ("#3b82f6" if year >= 2021 else "#94a3b8")
+        nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=color))
+        
+        if item['rel_type'] == 'cite':
+            edges.append(Edge(source=p_id, target=seed_id, color="#10b981", width=2))
+        else:
+            edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=2))
 
     config = Config(width="100%", height=600, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
     clicked_id = agraph(nodes=nodes, edges=edges, config=config)
@@ -218,58 +246,55 @@ def process_and_add_to_db(file_path, file_name, api_key):
 
 # ================= 5. 侧边栏 =================
 with st.sidebar:
-    st.header("🎛️ 助手控制台")
-    user_api_key = st.text_input("智谱 AI API Key", type="password")
-    ss_api_key = st.text_input("Semantic Scholar Key (可选)", type="password")
+    st.header("🎛️ 控制台")
+    user_api_key = st.text_input("智谱 API Key", type="password")
+    ss_api_key = st.text_input("SS API Key (等待审批中...)", type="password", help="在此填入 Semantic Scholar 密钥。不填将以匿名模式低速运行。")
     st.markdown("---")
     
     if st.session_state.loaded_files:
-        st.subheader("🗂️ 已加载文献")
+        st.subheader("🗂️ 文件管理")
         for file in list(st.session_state.loaded_files):
             col_f1, col_f2 = st.columns([4, 1])
-            with col_f1:
-                st.text(f"📄 {file[:18]}..." if len(file)>20 else f"📄 {file}")
+            with col_f1: st.text(f"📄 {file[:18]}..." if len(file)>20 else f"📄 {file}")
             with col_f2:
                 if st.button("🗑️", key=f"del_{file}"):
                     st.session_state.loaded_files.remove(file)
                     st.session_state.all_chunks = [c for c in st.session_state.all_chunks if c.metadata.get('source_paper') != file]
-                    if user_api_key:
-                        rebuild_index_from_chunks(user_api_key)
+                    if user_api_key: rebuild_index_from_chunks(user_api_key)
                     st.rerun()
         
-        if st.button("🗑️ 清空所有文献", type="primary"):
+        if st.button("🗑️ 清空全部", type="primary"):
             st.session_state.db = None
             st.session_state.loaded_files = []
             st.session_state.all_chunks = []
             st.session_state.chat_history = []
             st.rerun()
 
-    st.subheader("⚙️ 研读偏好")
-    reading_mode = st.radio("对话模式:", ["🟢 快速回答", "📖 逐段精读 (增强公式)"], index=1)
+    st.subheader("⚙️ 研读模式")
+    reading_mode = st.radio("选择模式:", ["🟢 快速问答", "📖 逐段精读 (公式修复版)"], index=1)
 
     if st.session_state.loaded_files:
         st.markdown("---")
-        if st.button("🪄 自动生成多论文对比表"):
+        if st.button("🪄 一键生成综述对比表"):
             if user_api_key and st.session_state.db:
-                with st.spinner("深度分析中..."):
+                with st.spinner("分析中..."):
                     llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                     aggregated_context = ""
                     for filename in st.session_state.loaded_files:
-                        sub_docs = st.session_state.db.similarity_search("Abstract and main findings", k=2, filter={"source_paper": filename})
-                        if sub_docs:
-                            aggregated_context += f"\n=== 文献: {filename} ===\n" + "\n".join([d.page_content for d in sub_docs])
-                    res = llm.invoke(f"基于以下内容生成 Markdown 对比表：\n{aggregated_context}")
+                        sub_docs = st.session_state.db.similarity_search("Abstract conclusion main contribution", k=3, filter={"source_paper": filename})
+                        if sub_docs: aggregated_context += f"\n=== {filename} ===\n" + "\n".join([d.page_content for d in sub_docs]) + "\n"
+                    res = llm.invoke(f"阅读以下摘要，生成 Markdown 表格(列：论文名|创新点|方法|结论)：\n{aggregated_context}")
                     st.session_state.chat_history.append({"role": "assistant", "content": res.content})
                     st.rerun()
 
         scope_options = ["🌐 对比所有论文"] + st.session_state.loaded_files
-        st.session_state.selected_scope = st.selectbox("👁️ 当前对话范围", scope_options)
+        st.session_state.selected_scope = st.selectbox("👁️ 专注范围", scope_options)
 
     st.markdown("---")
-    st.subheader("📥 本地论文上传")
-    uploaded_file = st.file_uploader("上传 PDF 文献", type="pdf")
-    if uploaded_file and user_api_key and st.button("开始解析并学习"):
-        with st.spinner("PDF 深度解析中..."):
+    st.subheader("📥 上传论文")
+    uploaded_file = st.file_uploader("拖入 PDF", type="pdf")
+    if uploaded_file and user_api_key and st.button("确认加载"):
+        with st.spinner("解析中..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(uploaded_file.getvalue())
                 path = tmp.name
@@ -278,60 +303,74 @@ with st.sidebar:
             st.rerun()
 
 # ================= 6. 主界面 =================
-tab_search, tab_chat = st.tabs(["🔍 文献调研", "💬 论文深读空间"])
+tab_search, tab_chat = st.tabs(["🔍 文献调研 (引用增强)", "💬 研读空间"])
 
 with tab_search:
-    st.subheader("🌍 ArXiv 全球文献检索")
+    st.subheader("🌍 学术大数据检索")
     col_q, col_sort, col_n = st.columns([3, 1.5, 1])
     with col_q:
-        search_query = st.text_input("检索关键词", placeholder="输入关键词，例如: transformer architecture")
+        search_query = st.text_input("关键词", value=st.session_state.suggested_query, placeholder="例如: education robot")
     with col_sort:
-        sort_mode = st.selectbox("排序方式", ["🔥 相关性优先", "📅 最新发布", "📈 引用量之最"])
+        sort_mode = st.selectbox("排序规则", ["🔥 相关性优先", "📅 时间由新到旧", "📈 引用量由高到低"])
     with col_n:
         max_results = st.number_input("获取数量", min_value=5, max_value=50, value=15)
         
-    if st.button("🚀 执行检索") and search_query:
-        with st.spinner("正在检索..."):
+    if st.button("🚀 开始检索") and search_query:
+        with st.spinner("正在检索并同步引用数据..."):
             try:
-                # 🛠️ 严格修正点：撤销关键词重组，直接传递原始 search_query
                 arxiv_sort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
-                
-                search = arxiv.Search(
-                    query=search_query, # 👈 恢复原始关键词传递
-                    max_results=max_results, 
-                    sort_by=arxiv_sort
-                )
-                
+                if "时间" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
+                refined_query = search_query
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    refined_query = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
+
+                search = arxiv.Search(query=refined_query, max_results=max_results, sort_by=arxiv_sort)
                 raw_results = list(search.results())
+                
                 results_with_cite = []
-                for res in raw_results:
+                progress_bar = st.progress(0)
+                for idx, res in enumerate(raw_results):
                     cites = fetch_citations(res.entry_id, ss_key=ss_api_key)
                     results_with_cite.append({'obj': res, 'citations': cites})
+                    progress_bar.progress((idx + 1) / len(raw_results))
+                
                 if "引用量" in sort_mode:
                     results_with_cite.sort(key=lambda x: x['citations'], reverse=True)
+                
                 st.session_state.search_results = results_with_cite
+                st.success(f"✅ 完成！已获取 {len(results_with_cite)} 篇论文。")
             except Exception as e:
                 st.error(f"检索失败: {e}")
                 
     if st.session_state.search_results:
         if st.session_state.focus_paper_id:
             st.markdown("---")
-            g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
-            if g_data:
+            st.subheader("📊 文献关联图谱 (Connected Graph)")
+            
+            with st.spinner("正在请求图谱数据 (匿名模式会有 2-3 秒延迟)..."):
+                g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
+            
+            if not g_data:
+                st.warning("⚠️ 暂时无法获取图谱。匿名模式每分钟请求有限，请稍后重试或检查 Key。")
+                if st.button("🔄 刷新尝试"):
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
                 col_graph, col_info = st.columns([2.5, 1])
                 with col_graph:
                     clicked_node_id, all_details = render_connected_graph(g_data)
+                
                 with col_info:
                     if clicked_node_id and clicked_node_id in all_details:
                         info = all_details[clicked_node_id]
-                        st.markdown(f"### 📄 选定文献详情")
+                        st.markdown(f"### 📄 详情")
                         st.markdown(f"**标题**: {info['title']}")
                         st.markdown(f"**年份**: {info['year']} | **引用**: {info['cites']}")
-                        st.markdown(f'<div class="abstract-box">{info["abstract"]}</div>', unsafe_allow_html=True)
+                        st.markdown("---")
+                        st.markdown(f"**摘要**: \n\n {info['abstract']}")
                     else:
-                        st.info("💡 点击圆点查看摘要。")
-                        if st.button("❌ 关闭图谱面板"):
+                        st.info("💡 **操作提示**\n\n点击圆点查看摘要。绿色为引用本文，蓝色为本文引用。")
+                        if st.button("❌ 关闭图谱"):
                             st.session_state.focus_paper_id = None
                             st.rerun()
             st.markdown("---")
@@ -340,45 +379,52 @@ with tab_search:
             res = item['obj']
             cites = item['citations']
             with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
-                st.markdown(f"**🔥 引用次数**: <span class='cite-badge'>{cites}</span>", unsafe_allow_html=True)
-                st.write(res.summary.replace("\n", " "))
+                st.markdown(f"**👨‍🏫 作者**: {', '.join([a.name for a in res.authors])} | **📅 发表**: {res.published.strftime('%Y-%m-%d')}")
+                st.markdown(f"**🔥 引用数**: <span class='cite-badge'>{cites}</span>", unsafe_allow_html=True)
+                st.markdown(f'<div class="abstract-box"><b>📝 摘要：</b><br>{res.summary.replace("\n", " ")}</div>', unsafe_allow_html=True)
+                
                 col1, col2, col3 = st.columns([1, 1, 1])
-                with col1: st.markdown(f"[🔗 ArXiv 页面]({res.entry_id})")
+                with col1: st.markdown(f"[🔗 ArXiv 原文]({res.entry_id})")
                 with col2:
-                    if st.button(f"⬇️ 加入深读库", key=f"dl_search_{i}"):
+                    if st.button(f"⬇️ 下载分析", key=f"dl_search_{i}"):
                         if user_api_key:
-                            with st.spinner("入库中..."):
-                                pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
-                                process_and_add_to_db(pdf_path, res.title, user_api_key)
-                                st.success("已添加")
-                        else: st.error("请填入 Key")
+                            with st.spinner("下载解析中..."):
+                                try:
+                                    pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
+                                    process_and_add_to_db(pdf_path, res.title, user_api_key)
+                                    st.success("入库成功！")
+                                except Exception as e: st.error(f"失败: {e}")
+                        else: st.error("请填入 智谱 API Key")
                 with col3:
-                    if st.button(f"🕸️ 查看关系群", key=f"btn_graph_{i}"):
+                    if st.button(f"🕸️ 关联图谱", key=f"btn_graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id
                         st.rerun()
 
 with tab_chat:
     if st.session_state.loaded_files:
-        st.caption(f"📚 范围：{st.session_state.selected_scope} | 模式：{reading_mode}")
+        st.caption(f"📚 模式：{reading_mode} | 范围：{st.session_state.selected_scope}")
     for msg in st.session_state.chat_history:
         if msg["role"] == "system_notice": st.info(msg["content"])
         else:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
-                
-    if prompt := st.chat_input("基于已加载的文献提问..."):
-        if not st.session_state.db: st.warning("⚠️ 请先添加论文。")
+    if prompt := st.chat_input("输入问题..."):
+        if not st.session_state.db: st.warning("🧠 请先添加论文")
         else:
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.write(prompt)
             with st.chat_message("assistant"):
                 try:
-                    scope = st.session_state.selected_scope
-                    f_dict = {"source_paper": scope} if scope != "🌐 对比所有论文" else None
-                    docs = st.session_state.db.similarity_search(prompt, k=8, filter=f_dict)
-                    context = "\n\n".join([f"📄【{d.metadata.get('source_paper','?')}】:\n{d.page_content}" for d in docs])
-                    llm = ChatZhipuAI(model="glm-4", api_key=user_api_key)
-                    response = llm.invoke(f"背景资料：\n{context}\n\n问题：{prompt}")
-                    final_content = fix_latex_errors(response.content)
-                    st.write(final_content)
-                    st.session_state.chat_history.append({"role": "assistant", "content": final_content})
-                except Exception as e: st.error(f"故障: {e}")
+                    search_k = 15 if "精读" in reading_mode else 8
+                    current_scope = st.session_state.get("selected_scope", "🌐 对比所有论文")
+                    filter_dict = {"source_paper": current_scope} if current_scope != "🌐 对比所有论文" else None
+                    docs = st.session_state.db.max_marginal_relevance_search(prompt, k=search_k, fetch_k=20, lambda_mult=0.6, filter=filter_dict)
+                    if not docs: st.warning("未找到相关内容。")
+                    else:
+                        context = "\n\n".join([f"📄【{d.metadata.get('source_paper','?')} P{d.metadata.get('page',0)+1}】:\n{d.page_content}" for d in docs])
+                        sys_prompt = f"你是一位科研助手。基于资料回答问题：\n资料：{context}\n问题：{prompt}\n要求：公式用 $ 包裹。"
+                        llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                        response = llm.invoke(sys_prompt)
+                        final_content = fix_latex_errors(response.content)
+                        st.write(final_content)
+                        st.session_state.chat_history.append({"role": "assistant", "content": final_content})
+                except Exception as e: st.error(f"生成出错: {e}")
