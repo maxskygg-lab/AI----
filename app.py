@@ -6,6 +6,7 @@ import tempfile
 import arxiv
 import requests
 import math
+import re
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # ================= 1. 环境听诊器 =================
@@ -79,11 +80,18 @@ if "focus_paper_id" not in st.session_state:
 
 # ================= 4. 核心逻辑函数 =================
 
+def get_pure_arxiv_id(url):
+    """从 URL 中精准提取 ArXiv ID"""
+    match = re.search(r'(\d{4}\.\d{4,5})', url)
+    if match:
+        return match.group(1)
+    return url.split('/')[-1].split('v')[0]
+
 def fetch_citations(arxiv_id):
     """从 Semantic Scholar API 获取引用数"""
     try:
-        clean_id = arxiv_id.split('/')[-1].split('v')[0]
-        api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount,title,year"
+        clean_id = get_pure_arxiv_id(arxiv_id)
+        api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
         response = requests.get(api_url, timeout=5)
         if response.status_code == 200:
             return response.json().get('citationCount', 0)
@@ -93,16 +101,25 @@ def fetch_citations(arxiv_id):
 
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id):
-    """获取关联数据，增加 abstract 字段并开启缓存"""
+    """获取关联数据，增加频率限制处理和字段精简"""
     try:
-        clean_id = arxiv_id.split('/')[-1].split('v')[0]
-        # 增加 abstract 和 paperId 字段以支撑详情显示
-        fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
+        clean_id = get_pure_arxiv_id(arxiv_id)
+        # 优化：不请求 references/citations 的 abstract 以减小数据包体积，防止 429 或超时
+        fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
-        response = requests.get(api_url, timeout=8)
-        if response.status_code == 200: return response.json()
-    except: pass
-    return None
+        
+        response = requests.get(api_url, timeout=10)
+        
+        if response.status_code == 429:
+            st.error("⚠️ 触发 API 频率限制，请等待一分钟后再试。")
+            return None
+        if response.status_code != 200:
+            return None
+            
+        return response.json()
+    except Exception as e:
+        st.error(f"图谱获取失败: {e}")
+        return None
 
 def render_connected_graph(data):
     """增强版：返回点击 ID 和 详情字典"""
@@ -147,7 +164,7 @@ def render_connected_graph(data):
         
         paper_details[p_id] = {
             "title": title,
-            "abstract": item.get('abstract', '该文献暂未提供摘要'),
+            "abstract": item.get('abstract', '该文献暂未在图谱中提供详细摘要，请查看原文。'),
             "year": year,
             "cites": cites
         }
@@ -316,7 +333,10 @@ with tab_search:
             
             g_data = fetch_graph_data(st.session_state.focus_paper_id)
             if not g_data:
-                st.warning("⚠️ 无法获取图谱数据。请稍后再试或检查 API 频率。")
+                st.warning("⚠️ 无法获取图谱数据。这通常是因为该论文未被 Semantic Scholar 收录，或 API 请求过快。")
+                if st.button("重试获取"):
+                    st.cache_data.clear()
+                    st.rerun()
             else:
                 col_graph, col_info = st.columns([2.5, 1])
                 with col_graph:
