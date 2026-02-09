@@ -4,8 +4,9 @@ import os
 import time
 import tempfile
 import arxiv
-import requests  # 新增：用于调用 Semantic Scholar API
-from streamlit_agraph import agraph, Node, Edge, Config # 新增：图谱库
+import requests
+import math  # 新增：用于计算节点大小
+from streamlit_agraph import agraph, Node, Edge, Config
 
 # ================= 1. 环境听诊器 =================
 try:
@@ -65,7 +66,7 @@ if "search_results" not in st.session_state:
     st.session_state.search_results = []
 if "selected_scope" not in st.session_state:
     st.session_state.selected_scope = "🌐 对比所有论文"
-if "focus_paper_id" not in st.session_state: # 新增：用于跟踪图谱展示
+if "focus_paper_id" not in st.session_state: 
     st.session_state.focus_paper_id = None
 
 # ================= 4. 核心逻辑函数 =================
@@ -82,35 +83,81 @@ def fetch_citations(arxiv_id):
         pass
     return 0
 
-# --- 新增图谱数据获取函数 ---
 def fetch_graph_data(arxiv_id):
+    """获取关联数据，增加字段以支撑 Connected Papers 效果"""
     try:
         clean_id = arxiv_id.split('/')[-1].split('v')[0]
-        fields = "title,year,references,citations"
+        # 增加 citationCount 以计算节点大小
+        fields = "title,year,citationCount,references.title,references.citationCount,references.year,citations.title,citations.citationCount,citations.year"
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
         response = requests.get(api_url, timeout=8)
         if response.status_code == 200: return response.json()
     except: pass
     return None
 
-# --- 新增图谱渲染函数 ---
+# --- 重构后的图谱渲染函数 (保持 Connected Papers 逻辑) ---
 def render_connected_graph(data):
-    if not data: return st.warning("无法获取关联数据")
-    nodes, edges = [], []
-    # 中心节点
-    nodes.append(Node(id="root", label="Seed Paper", size=25, color="#FF4B4B"))
-    # 被引 (Citations)
-    for i, item in enumerate(data.get('citations', [])[:10]):
-        nid = f"c_{i}"
-        nodes.append(Node(id=nid, label=item.get('title','')[:20], size=15, color="#2ca02c"))
-        edges.append(Edge(source=nid, target="root"))
-    # 引用 (References)
-    for i, item in enumerate(data.get('references', [])[:10]):
-        nid = f"r_{i}"
-        nodes.append(Node(id=nid, label=item.get('title','')[:20], size=15, color="#1f77b4"))
-        edges.append(Edge(source="root", target=nid))
+    if not data: 
+        return st.warning("⚠️ 无法获取关联数据")
     
-    config = Config(width=1000, height=450, directed=True, physics=True)
+    nodes, edges = [], []
+    
+    # 1. 中心种子节点
+    seed_id = "root"
+    seed_title = data.get('title', 'Seed Paper')
+    seed_cites = data.get('citationCount', 0)
+    nodes.append(Node(
+        id=seed_id, 
+        label=f"⭐ {seed_title[:25]}...", 
+        size=35, 
+        color="#FF4B4B"
+    ))
+
+    # 2. 数据去重处理
+    seen_ids = set()
+    ref_list = data.get('references', [])[:12]
+    cite_list = data.get('citations', [])[:12]
+    
+    combined = []
+    for p in ref_list:
+        pid = p.get('paperId')
+        if pid and pid not in seen_ids:
+            p['rel_type'] = 'ref'; combined.append(p); seen_ids.add(pid)
+    for p in cite_list:
+        pid = p.get('paperId')
+        if pid and pid not in seen_ids:
+            p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
+
+    # 3. 构建节点（基于引用量和年份）
+    for item in combined:
+        p_id = item.get('paperId')
+        title = item.get('title', 'Unknown')
+        year = item.get('year') or 2020
+        cites = item.get('citationCount', 0)
+        
+        # 节点大小：对数缩放
+        node_size = 12 + (math.log2(cites + 1) * 4)
+        
+        # 颜色：年份区分
+        if year >= 2024: color = "#10b981"   # 极新 (绿色)
+        elif year >= 2021: color = "#3b82f6" # 近期 (蓝色)
+        else: color = "#94a3b8"              # 早期 (灰色)
+
+        nodes.append(Node(
+            id=p_id, 
+            label=f"{title[:18]}..({year})", 
+            size=node_size, 
+            color=color,
+            title=f"Citations: {cites} | Year: {year}"
+        ))
+        
+        # 连线
+        if item['rel_type'] == 'cite':
+            edges.append(Edge(source=p_id, target=seed_id, color="#10b981", width=2))
+        else:
+            edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=2))
+
+    config = Config(width="100%", height=500, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
     return agraph(nodes=nodes, edges=edges, config=config)
 
 def fix_latex_errors(text):
@@ -142,7 +189,6 @@ def process_and_add_to_db(file_path, file_name, api_key):
         valid_chunks = [c for c in chunks if len(c.page_content.strip()) > 20]
         
         st.session_state.all_chunks.extend(valid_chunks)
-        
         embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
         
         batch_size = 10
@@ -167,22 +213,6 @@ def process_and_add_to_db(file_path, file_name, api_key):
         })
     except Exception as e:
         st.error(f"处理失败: {e}")
-
-def generate_html_report(chat_history):
-    html = """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>AI 研究笔记</title>
-    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-    <style>body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
-    .message { margin-bottom: 20px; padding: 15px; border-radius: 8px; }
-    .user { background-color: #e3f2fd; border-left: 5px solid #2196F3; }
-    .assistant { background-color: #f1f8e9; border-left: 5px solid #4CAF50; }</style></head>
-    <body><h1>🎓 AI 深度研读笔记</h1><p>导出时间：""" + time.strftime('%Y-%m-%d %H:%M') + """</p>"""
-    for msg in chat_history:
-        role_class = msg['role'] if msg['role'] in ['user', 'assistant'] else 'system'
-        content_html = msg['content'].replace('\n', '<br>')
-        html += f'<div class="message {role_class}"><b>{msg["role"]}</b><br>{content_html}</div>'
-    html += "</body></html>"
-    return html
 
 # ================= 5. 侧边栏 =================
 with st.sidebar:
@@ -257,11 +287,8 @@ with tab_search:
     if st.button("🚀 开始检索") and search_query:
         with st.spinner("正在检索并同步 Semantic Scholar 引用数据..."):
             try:
-                # ArXiv 排序参数映射
                 arxiv_sort = arxiv.SortCriterion.Relevance
                 if "时间" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
-                
-                # 自动优化布尔查询
                 refined_query = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     refined_query = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
@@ -269,7 +296,6 @@ with tab_search:
                 search = arxiv.Search(query=refined_query, max_results=max_results, sort_by=arxiv_sort)
                 raw_results = list(search.results())
                 
-                # 引用数补全
                 results_with_cite = []
                 progress_bar = st.progress(0)
                 for idx, res in enumerate(raw_results):
@@ -277,7 +303,6 @@ with tab_search:
                     results_with_cite.append({'obj': res, 'citations': cites})
                     progress_bar.progress((idx + 1) / len(raw_results))
                 
-                # 引用排序处理
                 if "引用量" in sort_mode:
                     results_with_cite.sort(key=lambda x: x['citations'], reverse=True)
                 
@@ -287,7 +312,6 @@ with tab_search:
                 st.error(f"检索失败: {e}")
                 
     if st.session_state.search_results:
-        # 新增图谱显示区域
         if st.session_state.focus_paper_id:
             st.markdown("---")
             st.subheader("📊 文献关联图谱 (Connected Graph)")
@@ -296,8 +320,11 @@ with tab_search:
                 g_data = fetch_graph_data(st.session_state.focus_paper_id)
                 render_connected_graph(g_data)
             with col_info:
-                st.caption("🟢 绿色: Citations (引用本文)")
-                st.caption("🔵 蓝色: References (参考文献)")
+                st.markdown("**图谱指南**")
+                st.caption("🔴 中心：您的种子论文")
+                st.caption("🟢 绿色节点：引用本文的文献")
+                st.caption("🔵 蓝色节点：本文引用的参考文献")
+                st.caption("📏 大小：表示该文献的总引用量")
                 if st.button("❌ 关闭图谱"):
                     st.session_state.focus_paper_id = None
                     st.rerun()
@@ -309,7 +336,6 @@ with tab_search:
             with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
                 st.markdown(f"**👨‍🏫 作者**: {', '.join([a.name for a in res.authors])} | **📅 发表**: {res.published.strftime('%Y-%m-%d')}")
                 st.markdown(f"**🔥 引用数 (Semantic Scholar)**: <span class='cite-badge'>{cites}</span>", unsafe_allow_html=True)
-                
                 st.markdown(f'<div class="abstract-box"><b>📝 摘要：</b><br>{res.summary.replace("\n", " ")}</div>', unsafe_allow_html=True)
                 
                 col1, col2, col3 = st.columns([1, 1, 1])
