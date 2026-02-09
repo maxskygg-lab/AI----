@@ -87,12 +87,18 @@ def get_pure_arxiv_id(url):
         return match.group(1)
     return url.split('/')[-1].split('v')[0]
 
-def fetch_citations(arxiv_id):
-    """从 Semantic Scholar API 获取引用数"""
+def fetch_citations(arxiv_id, ss_key=None):
+    """获取引用数 (带匿名限速保护)"""
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
-        response = requests.get(api_url, timeout=5)
+        headers = {"x-api-key": ss_key} if ss_key else {}
+        
+        # 匿名用户限速保护
+        if not ss_key:
+            time.sleep(0.5) 
+            
+        response = requests.get(api_url, headers=headers, timeout=5)
         if response.status_code == 200:
             return response.json().get('citationCount', 0)
     except:
@@ -100,36 +106,48 @@ def fetch_citations(arxiv_id):
     return 0
 
 @st.cache_data(ttl=3600)
-def fetch_graph_data(arxiv_id):
-    """获取关联数据，增加频率限制处理和字段精简"""
-    try:
-        clean_id = get_pure_arxiv_id(arxiv_id)
-        # 优化：不请求 references/citations 的 abstract 以减小数据包体积，防止 429 或超时
-        fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
-        api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
-        
-        response = requests.get(api_url, timeout=10)
-        
-        if response.status_code == 429:
-            st.error("⚠️ 触发 API 频率限制，请等待一分钟后再试。")
-            return None
-        if response.status_code != 200:
-            return None
+def fetch_graph_data(arxiv_id, ss_key=None):
+    """获取图谱数据 (支持指数退避重试)"""
+    clean_id = get_pure_arxiv_id(arxiv_id)
+    fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
+    api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
+    headers = {"x-api-key": ss_key} if ss_key else {}
+    
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            # 匿名用户请求前置延迟
+            if not ss_key:
+                time.sleep(1.5 * (attempt + 1)) 
             
-        return response.json()
-    except Exception as e:
-        st.error(f"图谱获取失败: {e}")
-        return None
+            response = requests.get(api_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                if attempt < max_retries:
+                    st.warning(f"⏳ 触发限流，正在进行第 {attempt+1} 次重试...")
+                    continue
+                else:
+                    st.error("🚫 达到 API 最大重试次数。请稍后再试或等待 Key 审批。")
+            elif response.status_code == 403:
+                st.error("🔑 API Key 校验失败，请检查填写。")
+                return None
+            else:
+                return None
+        except Exception as e:
+            if attempt == max_retries:
+                st.error(f"图谱获取失败: {e}")
+    return None
 
 def render_connected_graph(data):
-    """增强版：返回点击 ID 和 详情字典"""
+    """增强版图谱渲染"""
     if not data: 
         return None, {}
     
     nodes, edges = [], []
     paper_details = {} 
     
-    # 1. 中心种子节点
     seed_id = data.get('paperId', 'root')
     seed_title = data.get('title', 'Seed Paper')
     paper_details[seed_id] = {
@@ -140,7 +158,6 @@ def render_connected_graph(data):
     }
     nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
 
-    # 2. 数据去重处理
     seen_ids = set([seed_id])
     ref_list = data.get('references', [])[:12]
     cite_list = data.get('citations', [])[:12]
@@ -155,7 +172,6 @@ def render_connected_graph(data):
         if pid and pid not in seen_ids:
             p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
 
-    # 3. 构建节点
     for item in combined:
         p_id = item.get('paperId')
         title = item.get('title', 'Unknown')
@@ -164,14 +180,13 @@ def render_connected_graph(data):
         
         paper_details[p_id] = {
             "title": title,
-            "abstract": item.get('abstract', '该文献暂未在图谱中提供详细摘要，请查看原文。'),
+            "abstract": item.get('abstract', '详情请查看 ArXiv 或 Semantic Scholar 页面。'),
             "year": year,
             "cites": cites
         }
 
         node_size = 12 + (math.log2(cites + 1) * 4)
         color = "#10b981" if year >= 2024 else ("#3b82f6" if year >= 2021 else "#94a3b8")
-
         nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=color))
         
         if item['rel_type'] == 'cite':
@@ -233,6 +248,7 @@ def process_and_add_to_db(file_path, file_name, api_key):
 with st.sidebar:
     st.header("🎛️ 控制台")
     user_api_key = st.text_input("智谱 API Key", type="password")
+    ss_api_key = st.text_input("SS API Key (等待审批中...)", type="password", help="在此填入 Semantic Scholar 密钥。不填将以匿名模式低速运行。")
     st.markdown("---")
     
     if st.session_state.loaded_files:
@@ -300,7 +316,7 @@ with tab_search:
         max_results = st.number_input("获取数量", min_value=5, max_value=50, value=15)
         
     if st.button("🚀 开始检索") and search_query:
-        with st.spinner("正在检索并同步 Semantic Scholar 引用数据..."):
+        with st.spinner("正在检索并同步引用数据..."):
             try:
                 arxiv_sort = arxiv.SortCriterion.Relevance
                 if "时间" in sort_mode: arxiv_sort = arxiv.SortCriterion.SubmittedDate
@@ -314,7 +330,7 @@ with tab_search:
                 results_with_cite = []
                 progress_bar = st.progress(0)
                 for idx, res in enumerate(raw_results):
-                    cites = fetch_citations(res.entry_id)
+                    cites = fetch_citations(res.entry_id, ss_key=ss_api_key)
                     results_with_cite.append({'obj': res, 'citations': cites})
                     progress_bar.progress((idx + 1) / len(raw_results))
                 
@@ -331,10 +347,12 @@ with tab_search:
             st.markdown("---")
             st.subheader("📊 文献关联图谱 (Connected Graph)")
             
-            g_data = fetch_graph_data(st.session_state.focus_paper_id)
+            with st.spinner("正在请求图谱数据 (匿名模式会有 2-3 秒延迟)..."):
+                g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
+            
             if not g_data:
-                st.warning("⚠️ 无法获取图谱数据。这通常是因为该论文未被 Semantic Scholar 收录，或 API 请求过快。")
-                if st.button("重试获取"):
+                st.warning("⚠️ 暂时无法获取图谱。匿名模式每分钟请求有限，请稍后重试或检查 Key。")
+                if st.button("🔄 刷新尝试"):
                     st.cache_data.clear()
                     st.rerun()
             else:
@@ -351,7 +369,7 @@ with tab_search:
                         st.markdown("---")
                         st.markdown(f"**摘要**: \n\n {info['abstract']}")
                     else:
-                        st.info("💡 **操作提示**\n\n点击图谱圆点查看摘要。绿色为引用本文的文献，蓝色为本文引用的文献。")
+                        st.info("💡 **操作提示**\n\n点击圆点查看摘要。绿色为引用本文，蓝色为本文引用。")
                         if st.button("❌ 关闭图谱"):
                             st.session_state.focus_paper_id = None
                             st.rerun()
@@ -362,7 +380,7 @@ with tab_search:
             cites = item['citations']
             with st.expander(f"#{i+1} 📄 {res.title} ({res.published.year})"):
                 st.markdown(f"**👨‍🏫 作者**: {', '.join([a.name for a in res.authors])} | **📅 发表**: {res.published.strftime('%Y-%m-%d')}")
-                st.markdown(f"**🔥 引用数 (Semantic Scholar)**: <span class='cite-badge'>{cites}</span>", unsafe_allow_html=True)
+                st.markdown(f"**🔥 引用数**: <span class='cite-badge'>{cites}</span>", unsafe_allow_html=True)
                 st.markdown(f'<div class="abstract-box"><b>📝 摘要：</b><br>{res.summary.replace("\n", " ")}</div>', unsafe_allow_html=True)
                 
                 col1, col2, col3 = st.columns([1, 1, 1])
@@ -376,7 +394,7 @@ with tab_search:
                                     process_and_add_to_db(pdf_path, res.title, user_api_key)
                                     st.success("入库成功！")
                                 except Exception as e: st.error(f"失败: {e}")
-                        else: st.error("请填入 API Key")
+                        else: st.error("请填入 智谱 API Key")
                 with col3:
                     if st.button(f"🕸️ 关联图谱", key=f"btn_graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id
