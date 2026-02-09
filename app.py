@@ -102,19 +102,18 @@ def fetch_citations(arxiv_id, ss_key=None):
 
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
-    """获取关联数据（精准注入子项 abstract 字段）"""
+    """获取关联数据（确保每一级都显式包含摘要字段）"""
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
-        # 注意这里的 fields：每一级都带了 abstract
+        # 核心：fields 声明必须覆盖到 references 和 citations 的内部字段
         fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
         headers = {"x-api-key": ss_key} if ss_key else {}
         
-        # 匿名模式下的频率缓冲，防止被封 IP
         if not ss_key:
             time.sleep(1.5)
             
-        response = requests.get(api_url, headers=headers, timeout=10)
+        response = requests.get(api_url, headers=headers, timeout=12)
         if response.status_code == 200:
             return response.json()
         return None
@@ -123,7 +122,7 @@ def fetch_graph_data(arxiv_id, ss_key=None):
         return None
 
 def render_connected_graph(data):
-    """渲染图谱逻辑（建立真正的群簇）"""
+    """渲染图谱逻辑（增强摘要获取稳健性）"""
     if not data: 
         return None, {}
     
@@ -133,19 +132,27 @@ def render_connected_graph(data):
     # 1. 中心种子节点
     seed_id = data.get('paperId', 'root')
     seed_title = data.get('title', 'Seed Paper')
+    
+    # 尝试从 ArXiv 检索结果中找回种子节点的摘要（作为备份）
+    seed_abstract = data.get('abstract')
+    if not seed_abstract and st.session_state.search_results:
+        for item in st.session_state.search_results:
+            if seed_title in item['obj'].title:
+                seed_abstract = item['obj'].summary
+                break
+
     paper_details[seed_id] = {
         "title": seed_title,
-        "abstract": data.get('abstract', '无摘要信息'),
+        "abstract": seed_abstract or "该文献在 SS 数据库中暂无摘要内容。",
         "year": data.get('year', 'Unknown'),
         "cites": data.get('citationCount', 0)
     }
     nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
 
-    # 2. 建立关系簇
+    # 2. 建立关系群簇
     seen_ids = set([seed_id])
-    # 同时取参考文献和引用者，构建“群”
     for rel_type in ['references', 'citations']:
-        items = data.get(rel_type, [])[:15] # 每类取15篇确保视觉丰富度
+        items = data.get(rel_type, [])[:15] 
         for p in items:
             p_id = p.get('paperId')
             if not p_id or p_id in seen_ids:
@@ -153,22 +160,24 @@ def render_connected_graph(data):
             
             seen_ids.add(p_id)
             title = p.get('title', 'Unknown')
-            # 这里能拿到摘要是因为 fetch_graph_data 里的 fields 声明
+            # 强化这里的摘要获取逻辑
+            abstract_text = p.get('abstract')
+            if not abstract_text:
+                abstract_text = "该关联文献暂无详细摘要，请点击标题跳转 ArXiv/SS 页面查看。"
+
             paper_details[p_id] = {
                 "title": title,
-                "abstract": p.get('abstract') or "暂无详细摘要，请通过标题检索原文。",
+                "abstract": abstract_text,
                 "year": p.get('year', 'N/A'),
                 "cites": p.get('citationCount', 0)
             }
 
             c_count = p.get('citationCount', 0)
             node_size = 12 + (math.log2(c_count + 1) * 4)
-            # 颜色区分：蓝色是参考文献，绿色是后续研究
             node_color = "#3b82f6" if rel_type == 'references' else "#10b981"
 
             nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=node_color))
             
-            # 建立连线
             if rel_type == 'references':
                 edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=1))
             else:
@@ -314,13 +323,13 @@ with tab_search:
                 st.error(f"检索失败: {e}")
                 
     if st.session_state.search_results:
-        # 图谱渲染入口
+        # 图谱渲染
         if st.session_state.focus_paper_id:
             st.markdown("---")
             st.subheader("📊 文献关联图谱 (Connected Graph)")
             g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
             if not g_data:
-                st.warning("⚠️ 无法获取图谱。匿名模式可能由于请求过快被拦截，请稍后重试。")
+                st.warning("⚠️ 无法获取图谱数据。")
             else:
                 col_graph, col_info = st.columns([2.5, 1])
                 with col_graph:
@@ -332,9 +341,10 @@ with tab_search:
                         st.markdown(f"**标题**: {info['title']}")
                         st.markdown(f"**年份**: {info['year']} | **引用**: {info['cites']}")
                         st.markdown("---")
+                        # 确保此处显示摘要
                         st.markdown(f'<div class="abstract-box">{info["abstract"]}</div>', unsafe_allow_html=True)
                     else:
-                        st.info("💡 **操作提示**\n\n点击图谱圆点查看摘要。\n- **蓝色节点**：参考文献\n- **绿色节点**：引用本文的研究")
+                        st.info("💡 **操作提示**\n\n点击图谱圆点查看摘要。")
                         if st.button("❌ 关闭图谱"):
                             st.session_state.focus_paper_id = None
                             st.rerun()
