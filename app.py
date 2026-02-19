@@ -130,66 +130,96 @@ def fetch_graph_data(arxiv_id, ss_key=None):
     return None
 
 def render_connected_graph(data):
-    """增强版图谱渲染 (支持显示关联文献摘要)"""
-    if not data: 
-        return None, {}
+    """
+    深度重构：Connected Papers 风格图谱
+    - 节点大小：正比于 citationCount (对数缩放)
+    - 颜色深度：代表年份新旧 (2025/26 为深绿/深蓝)
+    """
+    if not data: return None, {}
     
     nodes, edges = [], []
     paper_details = {} 
     
-    # 1. 处理种子论文 (中心节点)
+    # 获取当前年份以计算颜色梯度
+    current_year = 2026 
+    
+    def get_color(year, rel_type):
+        if not year or year == 'Unknown': return "#94a3b8"
+        # 计算年份差距，越近颜色越亮/深
+        age = max(0, current_year - int(year))
+        if rel_type == 'seed': return "#FF4B4B" # 种子节点始终红色
+        if rel_type == 'cite': # 引用(绿色系)
+            return "#059669" if age < 2 else "#10b981" if age < 5 else "#6ee7b7"
+        else: # 被引(蓝色系)
+            return "#2563eb" if age < 2 else "#3b82f6" if age < 5 else "#93c5fd"
+
     seed_id = data.get('paperId', 'root')
     seed_title = data.get('title', 'Seed Paper')
     paper_details[seed_id] = {
         "title": seed_title,
-        "abstract": data.get('abstract') or "该摘要未公开或暂无。",
+        "abstract": data.get('abstract') or "无摘要",
         "year": data.get('year', 'Unknown'),
-        "cites": data.get('citationCount', 0)
+        "cites": data.get('citationCount', 0),
+        "url": f"https://www.semanticscholar.org/paper/{seed_id}"
     }
-    nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
+    
+    # 种子节点（中心）
+    nodes.append(Node(id=seed_id, label="THIS PAPER", size=35, color=get_color(data.get('year'), 'seed')))
 
     seen_ids = set([seed_id])
-    ref_list = data.get('references', [])[:12]   # 限制数量防止画面太乱
-    cite_list = data.get('citations', [])[:12]
-    
+    # 扩大展示范围至 20 篇，更接近 Connected Papers 的密集感
     combined = []
-    for p in ref_list:
-        pid = p.get('paperId')
-        if pid and pid not in seen_ids:
-            p['rel_type'] = 'ref'; combined.append(p); seen_ids.add(pid)
-    for p in cite_list:
-        pid = p.get('paperId')
-        if pid and pid not in seen_ids:
-            p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
+    for p in data.get('references', [])[:15]: 
+        p['rel_type'] = 'ref'; combined.append(p)
+    for p in data.get('citations', [])[:15]: 
+        p['rel_type'] = 'cite'; combined.append(p)
 
-    # 2. 处理关联节点
     for item in combined:
         p_id = item.get('paperId')
+        if not p_id or p_id in seen_ids: continue
+        seen_ids.add(p_id)
+        
         title = item.get('title', 'Unknown')
-        year = item.get('year') or "N/A"
+        year = item.get('year')
         cites = item.get('citationCount', 0)
-        # 核心修改：从 item 中提取摘要
-        abstract = item.get('abstract') or "暂无详细摘要，请点击 ArXiv 链接查看原文。"
         
         paper_details[p_id] = {
             "title": title,
-            "abstract": abstract,
+            "abstract": item.get('abstract') or "暂无详细摘要。",
             "year": year,
-            "cites": cites
+            "cites": cites,
+            "url": f"https://www.semanticscholar.org/paper/{p_id}"
         }
 
-        node_size = 12 + (math.log2(cites + 1) * 4)
-        color = "#10b981" if item['rel_type'] == 'cite' else "#3b82f6"
-        nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=color))
+        # 模拟 Connected Papers 的大小逻辑：min 15px, 根据引用量增长
+        node_size = 15 + (math.log(cites + 1) * 3.5)
+        node_color = get_color(year, item['rel_type'])
         
+        nodes.append(Node(id=p_id, label=f"{title[:20]}...", size=node_size, color=node_color))
+        
+        # 连线
         if item['rel_type'] == 'cite':
-            edges.append(Edge(source=p_id, target=seed_id, color="#10b981", width=2))
+            edges.append(Edge(source=p_id, target=seed_id, color="#d1d5db", width=1, dashed=True))
         else:
-            edges.append(Edge(source=seed_id, target=p_id, color="#3b82f6", width=2))
+            edges.append(Edge(source=seed_id, target=p_id, color="#94a3b8", width=1.5))
 
-    config = Config(width="100%", height=600, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
+    # 配置物理引擎：让节点分布更均匀，避免重叠
+    config = Config(
+        width="100%", 
+        height=650, 
+        directed=True, 
+        physics=True, 
+        nodeHighlightBehavior=True, 
+        highlightColor="#F7D154",
+        collapsible=False,
+        staticGraph=False,
+        # 物理引擎微调
+        d3={'alphaTarget': 0.05, 'gravity': -250, 'linkLength': 150, 'linkStrength': 0.1}
+    )
+    
     clicked_id = agraph(nodes=nodes, edges=edges, config=config)
     return clicked_id, paper_details
+
 
 
 def fix_latex_errors(text):
@@ -358,20 +388,38 @@ with tab_search:
                 with col_graph:
                     clicked_node_id, all_details = render_connected_graph(g_data)
                 
-                with col_info:
-                    if clicked_node_id and clicked_node_id in all_details:
-                        info = all_details[clicked_node_id]
-                        st.markdown(f"### 📄 详情")
-                        st.markdown(f"**标题**: {info['title']}")
-                        st.markdown(f"**年份**: {info['year']} | **引用**: {info['cites']}")
-                        st.markdown("---")
-                        st.markdown(f"**摘要**: \n\n {info['abstract']}")
-                    else:
-                        st.info("💡 **操作提示**\n\n点击圆点查看摘要。绿色为引用本文，蓝色为本文引用。")
-                        if st.button("❌ 关闭图谱"):
-                            st.session_state.focus_paper_id = None
-                            st.rerun()
-            st.markdown("---")
+                # 在 tab_search 的 focus_paper_id 判断逻辑内
+with col_info:
+    if clicked_node_id and clicked_node_id in all_details:
+        info = all_details[clicked_node_id]
+        st.markdown(f"### 📑 文献详情")
+        st.markdown(f"**{info['title']}**")
+        
+        c1, c2 = st.columns(2)
+        c1.metric("📅 年份", info['year'])
+        c2.metric("🔥 引用", info['cites'])
+        
+        st.markdown("---")
+        st.markdown(f"**摘要**: \n\n <div style='font-size:0.85em; color:#444; height:300px; overflow-y:auto;'>{info['abstract']}</div>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("""
+<div style="display: flex; gap: 20px; justify-content: center; padding: 10px; background: #f8fafc; border-radius: 10px;">
+    <span style="color: #FF4B4B;">● 当前论文</span>
+    <span style="color: #10b981;">● 引用本文 (Citations)</span>
+    <span style="color: #3b82f6;">● 本文引用 (References)</span>
+    <span style="color: #94a3b8; font-size: 0.8em;">(节点大小 = 引用量)</span>
+</div>
+""", unsafe_allow_html=True)
+
+        
+        # 增加跳转功能
+        st.link_button("🌐 在 Semantic Scholar 中查看", info['url'], use_container_width=True)
+        
+        if st.button("🔬 将此文加入研读队列", use_container_width=True):
+            st.info("此功能可结合 ArXiv 下载逻辑实现自动入库")
+    else:
+        st.info("🎯 **图谱交互指南**\n\n- **滚动鼠标**：缩放图谱\n- **拖拽节点**：固定位置\n- **点击圆点**：查看深度摘要和引用分析\n\n*图谱颜色越深代表年份越近，节点越大代表影响力（引用量）越高。*")
+
 
         for i, item in enumerate(st.session_state.search_results):
             res = item['obj']
@@ -426,4 +474,5 @@ with tab_chat:
                         st.write(final_content)
                         st.session_state.chat_history.append({"role": "assistant", "content": final_content})
                 except Exception as e: st.error(f"生成出错: {e}")
+
 
