@@ -108,54 +108,48 @@ def fetch_citations(arxiv_id, ss_key=None):
 
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
-    """获取图谱数据 (支持指数退避重试)"""
+    """获取图谱数据 (已增强摘要字段获取)"""
     clean_id = get_pure_arxiv_id(arxiv_id)
-    fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
+    # 关键修改：在 references 和 citations 后面都加上了 .abstract
+    fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
     headers = {"x-api-key": ss_key} if ss_key else {}
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # 有 Key 则无需前置等待
-            if not ss_key and attempt > 0:
-                time.sleep(2) 
-            
             response = requests.get(api_url, headers=headers, timeout=12)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                wait_time = (attempt + 1) * 3
-                st.warning(f"⏳ API 频率限制，正在重试 ({attempt+1}/{max_retries})...")
-                time.sleep(wait_time)
+                time.sleep((attempt + 1) * 2)
                 continue
-            else:
-                return None
-        except Exception as e:
-            if attempt == max_retries - 1:
-                st.error(f"图谱获取失败: {e}")
+            else: return None
+        except:
+            if attempt == max_retries - 1: return None
     return None
 
 def render_connected_graph(data):
-    """增强版图谱渲染 (保持你原始的 UI 逻辑)"""
+    """增强版图谱渲染 (支持显示关联文献摘要)"""
     if not data: 
         return None, {}
     
     nodes, edges = [], []
     paper_details = {} 
     
+    # 1. 处理种子论文 (中心节点)
     seed_id = data.get('paperId', 'root')
     seed_title = data.get('title', 'Seed Paper')
     paper_details[seed_id] = {
         "title": seed_title,
-        "abstract": data.get('abstract', '无摘要信息'),
+        "abstract": data.get('abstract') or "该摘要未公开或暂无。",
         "year": data.get('year', 'Unknown'),
         "cites": data.get('citationCount', 0)
     }
     nodes.append(Node(id=seed_id, label="⭐ SEED", size=30, color="#FF4B4B"))
 
     seen_ids = set([seed_id])
-    ref_list = data.get('references', [])[:12]
+    ref_list = data.get('references', [])[:12]   # 限制数量防止画面太乱
     cite_list = data.get('citations', [])[:12]
     
     combined = []
@@ -168,21 +162,24 @@ def render_connected_graph(data):
         if pid and pid not in seen_ids:
             p['rel_type'] = 'cite'; combined.append(p); seen_ids.add(pid)
 
+    # 2. 处理关联节点
     for item in combined:
         p_id = item.get('paperId')
         title = item.get('title', 'Unknown')
-        year = item.get('year') or 2020
+        year = item.get('year') or "N/A"
         cites = item.get('citationCount', 0)
+        # 核心修改：从 item 中提取摘要
+        abstract = item.get('abstract') or "暂无详细摘要，请点击 ArXiv 链接查看原文。"
         
         paper_details[p_id] = {
             "title": title,
-            "abstract": item.get('abstract', '详情请查看 ArXiv 或 Semantic Scholar 页面。'),
+            "abstract": abstract,
             "year": year,
             "cites": cites
         }
 
         node_size = 12 + (math.log2(cites + 1) * 4)
-        color = "#10b981" if year >= 2024 else ("#3b82f6" if year >= 2021 else "#94a3b8")
+        color = "#10b981" if item['rel_type'] == 'cite' else "#3b82f6"
         nodes.append(Node(id=p_id, label=f"{title[:15]}...", size=node_size, color=color))
         
         if item['rel_type'] == 'cite':
@@ -193,6 +190,7 @@ def render_connected_graph(data):
     config = Config(width="100%", height=600, directed=True, physics=True, nodeHighlightBehavior=True, highlightColor="#F7D154")
     clicked_id = agraph(nodes=nodes, edges=edges, config=config)
     return clicked_id, paper_details
+
 
 def fix_latex_errors(text):
     if not text: return text
@@ -428,3 +426,4 @@ with tab_chat:
                         st.write(final_content)
                         st.session_state.chat_history.append({"role": "assistant", "content": final_content})
                 except Exception as e: st.error(f"生成出错: {e}")
+
