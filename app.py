@@ -17,7 +17,6 @@ try:
 except ImportError as e:
     st.error(f"🚑 环境缺失库 -> {e.name}")
     st.stop()
-# ===============================================
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
@@ -78,7 +77,7 @@ if "selected_scope" not in st.session_state:
 if "focus_paper_id" not in st.session_state: 
     st.session_state.focus_paper_id = None
 
-# ================= 4. 核心逻辑函数 =================
+# ================= 4. 核心逻辑函数 (SS API 增强版) =================
 
 def get_pure_arxiv_id(url):
     """从 URL 中精准提取 ArXiv ID"""
@@ -94,11 +93,11 @@ def fetch_citations(arxiv_id, ss_key=None):
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
         headers = {"x-api-key": ss_key} if ss_key else {}
         
-        # 核心逻辑：有 Key 时仅保留极小延迟确保稳定性，无 Key 时强制等待
+        # 优化点：有 Key 时降低延迟，没 Key 时保持慢速
         if not ss_key:
             time.sleep(1.0) 
         else:
-            time.sleep(0.02) # 有 Key 后每秒可支撑约 50 次请求
+            time.sleep(0.02) 
             
         response = requests.get(api_url, headers=headers, timeout=5)
         if response.status_code == 200:
@@ -107,10 +106,9 @@ def fetch_citations(arxiv_id, ss_key=None):
         pass
     return 0
 
-
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
-    """获取图谱数据 (高速重试版)"""
+    """获取图谱数据 (支持指数退避重试)"""
     clean_id = get_pure_arxiv_id(arxiv_id)
     fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
@@ -119,22 +117,27 @@ def fetch_graph_data(arxiv_id, ss_key=None):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            # 有 Key 则无需前置等待
+            if not ss_key and attempt > 0:
+                time.sleep(2) 
+            
             response = requests.get(api_url, headers=headers, timeout=12)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                wait_time = (attempt + 1) * 2 # 触发限流时自动等待
+                wait_time = (attempt + 1) * 3
+                st.warning(f"⏳ API 频率限制，正在重试 ({attempt+1}/{max_retries})...")
                 time.sleep(wait_time)
                 continue
             else:
                 return None
-        except Exception:
-            if attempt == max_retries - 1: return None
+        except Exception as e:
+            if attempt == max_retries - 1:
+                st.error(f"图谱获取失败: {e}")
     return None
 
-
 def render_connected_graph(data):
-    """增强版图谱渲染"""
+    """增强版图谱渲染 (保持你原始的 UI 逻辑)"""
     if not data: 
         return None, {}
     
@@ -241,13 +244,13 @@ def process_and_add_to_db(file_path, file_name, api_key):
 with st.sidebar:
     st.header("🎛️ 控制台")
     user_api_key = st.text_input("智谱 API Key", type="password")
-    # 找到这段代码并替换
-ss_api_key = st.text_input("Semantic Scholar API Key", type="password", help="填入 Key 以启用高速调研模式")
-if ss_api_key:
-    st.caption("🚀 高速模式已激活")
-else:
-    st.caption("🐢 匿名模式 (限速中)")
-
+    ss_api_key = st.text_input("Semantic Scholar API Key", type="password", help="在此填入你的 SS 密钥。")
+    if ss_api_key:
+        st.success("🚀 高速调研模式已激活")
+    else:
+        st.caption("🐢 处于匿名限速模式")
+    
+    st.markdown("---")
     
     if st.session_state.loaded_files:
         st.subheader("🗂️ 文件管理")
@@ -328,6 +331,7 @@ with tab_search:
                 results_with_cite = []
                 progress_bar = st.progress(0)
                 for idx, res in enumerate(raw_results):
+                    # 关键修改：传入 ss_api_key
                     cites = fetch_citations(res.entry_id, ss_key=ss_api_key)
                     results_with_cite.append({'obj': res, 'citations': cites})
                     progress_bar.progress((idx + 1) / len(raw_results))
@@ -345,14 +349,12 @@ with tab_search:
             st.markdown("---")
             st.subheader("📊 文献关联图谱 (Connected Graph)")
             
-            with st.spinner("正在请求图谱数据 (匿名模式会有 2-3 秒延迟)..."):
+            with st.spinner("正在请求图谱数据..."):
+                # 关键修改：传入 ss_api_key
                 g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
             
             if not g_data:
-                st.warning("⚠️ 暂时无法获取图谱。匿名模式每分钟请求有限，请稍后重试或检查 Key。")
-                if st.button("🔄 刷新尝试"):
-                    st.cache_data.clear()
-                    st.rerun()
+                st.warning("⚠️ 暂时无法获取图谱。请检查 Key 或稍后再试。")
             else:
                 col_graph, col_info = st.columns([2.5, 1])
                 with col_graph:
@@ -426,4 +428,3 @@ with tab_chat:
                         st.write(final_content)
                         st.session_state.chat_history.append({"role": "assistant", "content": final_content})
                 except Exception as e: st.error(f"生成出错: {e}")
-
