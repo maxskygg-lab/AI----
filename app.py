@@ -220,8 +220,6 @@ def render_connected_graph(data):
     clicked_id = agraph(nodes=nodes, edges=edges, config=config)
     return clicked_id, paper_details
 
-
-
 def fix_latex_errors(text):
     if not text: return text
     text = text.replace(r"\(", "$").replace(r"\)", "$")
@@ -388,21 +386,21 @@ with tab_search:
                 with col_graph:
                     clicked_node_id, all_details = render_connected_graph(g_data)
                 
-                # 在 tab_search 的 focus_paper_id 判断逻辑内
-with col_info:
-    if clicked_node_id and clicked_node_id in all_details:
-        info = all_details[clicked_node_id]
-        st.markdown(f"### 📑 文献详情")
-        st.markdown(f"**{info['title']}**")
-        
-        c1, c2 = st.columns(2)
-        c1.metric("📅 年份", info['year'])
-        c2.metric("🔥 引用", info['cites'])
-        
-        st.markdown("---")
-        st.markdown(f"**摘要**: \n\n <div style='font-size:0.85em; color:#444; height:300px; overflow-y:auto;'>{info['abstract']}</div>", unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown("""
+                # 修复：将 col_info 逻辑放在正确的作用域内
+                with col_info:
+                    if clicked_node_id and clicked_node_id in all_details:
+                        info = all_details[clicked_node_id]
+                        st.markdown(f"### 📑 文献详情")
+                        st.markdown(f"**{info['title']}**")
+                        
+                        c1, c2 = st.columns(2)
+                        c1.metric("📅 年份", info['year'])
+                        c2.metric("🔥 引用", info['cites'])
+                        
+                        st.markdown("---")
+                        st.markdown(f"**摘要**: \n\n <div style='font-size:0.85em; color:#444; height:300px; overflow-y:auto;'>{info['abstract']}</div>", unsafe_allow_html=True)
+                        st.markdown("---")
+                        st.markdown("""
 <div style="display: flex; gap: 20px; justify-content: center; padding: 10px; background: #f8fafc; border-radius: 10px;">
     <span style="color: #FF4B4B;">● 当前论文</span>
     <span style="color: #10b981;">● 引用本文 (Citations)</span>
@@ -411,16 +409,15 @@ with col_info:
 </div>
 """, unsafe_allow_html=True)
 
+                        # 增加跳转功能
+                        st.link_button("🌐 在 Semantic Scholar 中查看", info['url'], use_container_width=True)
+                        
+                        if st.button("🔬 将此文加入研读队列", use_container_width=True):
+                            st.info("此功能可结合 ArXiv 下载逻辑实现自动入库")
+                    else:
+                        st.info("🎯 **图谱交互指南**\n\n- **滚动鼠标**：缩放图谱\n- **拖拽节点**：固定位置\n- **点击圆点**：查看深度摘要和引用分析\n\n*图谱颜色越深代表年份越近，节点越大代表影响力（引用量）越高。*")
         
-        # 增加跳转功能
-        st.link_button("🌐 在 Semantic Scholar 中查看", info['url'], use_container_width=True)
-        
-        if st.button("🔬 将此文加入研读队列", use_container_width=True):
-            st.info("此功能可结合 ArXiv 下载逻辑实现自动入库")
-    else:
-        st.info("🎯 **图谱交互指南**\n\n- **滚动鼠标**：缩放图谱\n- **拖拽节点**：固定位置\n- **点击圆点**：查看深度摘要和引用分析\n\n*图谱颜色越深代表年份越近，节点越大代表影响力（引用量）越高。*")
-
-
+        # 检索结果列表展示
         for i, item in enumerate(st.session_state.search_results):
             res = item['obj']
             cites = item['citations']
@@ -473,6 +470,5 @@ with tab_chat:
                         final_content = fix_latex_errors(response.content)
                         st.write(final_content)
                         st.session_state.chat_history.append({"role": "assistant", "content": final_content})
-                except Exception as e: st.error(f"生成出错: {e}")
-
-
+                except Exception as e: 
+                    st.error(f"生成出错: {e}")
