@@ -88,15 +88,17 @@ def get_pure_arxiv_id(url):
     return url.split('/')[-1].split('v')[0]
 
 def fetch_citations(arxiv_id, ss_key=None):
-    """获取引用数 (带匿名限速保护)"""
+    """获取引用数 (已启用 API Key 加速)"""
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
         headers = {"x-api-key": ss_key} if ss_key else {}
         
-        # 匿名用户限速保护
+        # 核心逻辑：有 Key 时仅保留极小延迟确保稳定性，无 Key 时强制等待
         if not ss_key:
-            time.sleep(0.5) 
+            time.sleep(1.0) 
+        else:
+            time.sleep(0.02) # 有 Key 后每秒可支撑约 50 次请求
             
         response = requests.get(api_url, headers=headers, timeout=5)
         if response.status_code == 200:
@@ -105,40 +107,31 @@ def fetch_citations(arxiv_id, ss_key=None):
         pass
     return 0
 
+
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
-    """获取图谱数据 (支持指数退避重试)"""
+    """获取图谱数据 (高速重试版)"""
     clean_id = get_pure_arxiv_id(arxiv_id)
     fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,citations.paperId,citations.title,citations.citationCount,citations.year"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
     headers = {"x-api-key": ss_key} if ss_key else {}
     
-    max_retries = 2
-    for attempt in range(max_retries + 1):
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            # 匿名用户请求前置延迟
-            if not ss_key:
-                time.sleep(1.5 * (attempt + 1)) 
-            
-            response = requests.get(api_url, headers=headers, timeout=10)
-            
+            response = requests.get(api_url, headers=headers, timeout=12)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                if attempt < max_retries:
-                    st.warning(f"⏳ 触发限流，正在进行第 {attempt+1} 次重试...")
-                    continue
-                else:
-                    st.error("🚫 达到 API 最大重试次数。请稍后再试或等待 Key 审批。")
-            elif response.status_code == 403:
-                st.error("🔑 API Key 校验失败，请检查填写。")
-                return None
+                wait_time = (attempt + 1) * 2 # 触发限流时自动等待
+                time.sleep(wait_time)
+                continue
             else:
                 return None
-        except Exception as e:
-            if attempt == max_retries:
-                st.error(f"图谱获取失败: {e}")
+        except Exception:
+            if attempt == max_retries - 1: return None
     return None
+
 
 def render_connected_graph(data):
     """增强版图谱渲染"""
@@ -248,8 +241,13 @@ def process_and_add_to_db(file_path, file_name, api_key):
 with st.sidebar:
     st.header("🎛️ 控制台")
     user_api_key = st.text_input("智谱 API Key", type="password")
-    ss_api_key = st.text_input("SS API Key (等待审批中...)", type="password", help="在此填入 Semantic Scholar 密钥。不填将以匿名模式低速运行。")
-    st.markdown("---")
+    # 找到这段代码并替换
+ss_api_key = st.text_input("Semantic Scholar API Key", type="password", help="填入 Key 以启用高速调研模式")
+if ss_api_key:
+    st.caption("🚀 高速模式已激活")
+else:
+    st.caption("🐢 匿名模式 (限速中)")
+
     
     if st.session_state.loaded_files:
         st.subheader("🗂️ 文件管理")
@@ -428,3 +426,4 @@ with tab_chat:
                         st.write(final_content)
                         st.session_state.chat_history.append({"role": "assistant", "content": final_content})
                 except Exception as e: st.error(f"生成出错: {e}")
+
