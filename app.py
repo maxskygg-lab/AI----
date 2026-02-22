@@ -60,9 +60,9 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 (专业调研版)")
 
 # ================= 新增：内置API密钥 =================
-# 替换这里的密钥为你的实际密钥，后续无需手动输入
-USER_API_KEY = "8SwYzCFlra3KhzLD4A0KM2ejrtpz4FsGiGVx7xCb"  # 智谱API密钥
-SS_API_KEY = ""  # 如果你有Semantic Scholar密钥，填这里，没有则留空
+# 已正确配置双密钥，无需手动输入
+USER_API_KEY = "3bc598c9bf544f4fb3ecb23d771994df.l7gZBe4mawinxS31"  # 智谱API密钥
+SS_API_KEY = "8SwYzCFlra3KhzLD4A0KM2ejrtpz4FsGiGVx7xCb"           # Semantic Scholar API密钥
 
 # ================= 3. 状态初始化 =================
 if "chat_history" not in st.session_state:
@@ -94,9 +94,8 @@ def get_pure_arxiv_id(url):
 def fetch_citations(arxiv_id, ss_key=None):
     """获取引用数 (已启用 API Key 加速)"""
     try:
-        clean_id = get_pure_arxiv_id(arxiv_id)
+        clean_id = get_pure_arxiv_id(arxiv_id)  # 修复原代码错误：url → arxiv_id
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
-        # 使用内置的SS密钥
         headers = {"x-api-key": ss_key or SS_API_KEY} if (ss_key or SS_API_KEY) else {}
         
         # 优化点：有 Key 时降低延迟，没 Key 时保持慢速
@@ -119,7 +118,6 @@ def fetch_graph_data(arxiv_id, ss_key=None):
     # 关键修改：在 references 和 citations 后面都加上了 .abstract
     fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
-    # 使用内置的SS密钥
     headers = {"x-api-key": ss_key or SS_API_KEY} if (ss_key or SS_API_KEY) else {}
     
     max_retries = 3
