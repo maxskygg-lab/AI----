@@ -59,6 +59,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.title("📖 AI 深度研读助手 (专业调研版)")
 
+# ================= 新增：内置API密钥 =================
+# 替换这里的密钥为你的实际密钥，后续无需手动输入
+USER_API_KEY = "8SwYzCFlra3KhzLD4A0KM2ejrtpz4FsGiGVx7xCb"  # 智谱API密钥
+SS_API_KEY = ""  # 如果你有Semantic Scholar密钥，填这里，没有则留空
+
 # ================= 3. 状态初始化 =================
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
@@ -91,10 +96,11 @@ def fetch_citations(arxiv_id, ss_key=None):
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
         api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=citationCount"
-        headers = {"x-api-key": ss_key} if ss_key else {}
+        # 使用内置的SS密钥
+        headers = {"x-api-key": ss_key or SS_API_KEY} if (ss_key or SS_API_KEY) else {}
         
         # 优化点：有 Key 时降低延迟，没 Key 时保持慢速
-        if not ss_key:
+        if not (ss_key or SS_API_KEY):
             time.sleep(1.0) 
         else:
             time.sleep(0.02) 
@@ -113,7 +119,8 @@ def fetch_graph_data(arxiv_id, ss_key=None):
     # 关键修改：在 references 和 citations 后面都加上了 .abstract
     fields = "paperId,title,year,citationCount,abstract,references.paperId,references.title,references.citationCount,references.year,references.abstract,citations.paperId,citations.title,citations.citationCount,citations.year,citations.abstract"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
-    headers = {"x-api-key": ss_key} if ss_key else {}
+    # 使用内置的SS密钥
+    headers = {"x-api-key": ss_key or SS_API_KEY} if (ss_key or SS_API_KEY) else {}
     
     max_retries = 3
     for attempt in range(max_retries):
@@ -269,8 +276,12 @@ def process_and_add_to_db(file_path, file_name, api_key):
 # ================= 5. 侧边栏 =================
 with st.sidebar:
     st.header("🎛️ 控制台")
-    user_api_key = st.text_input("智谱 API Key", type="password")
-    ss_api_key = st.text_input("Semantic Scholar API Key", type="password", help="在此填入你的 SS 密钥。")
+    # 注释掉手动输入框，使用内置密钥
+    # user_api_key = st.text_input("智谱 API Key", type="password")
+    # ss_api_key = st.text_input("Semantic Scholar API Key", type="password", help="在此填入你的 SS 密钥。")
+    user_api_key = USER_API_KEY  # 使用内置智谱密钥
+    ss_api_key = SS_API_KEY      # 使用内置SS密钥
+    
     if ss_api_key:
         st.success("🚀 高速调研模式已激活")
     else:
@@ -357,7 +368,7 @@ with tab_search:
                 results_with_cite = []
                 progress_bar = st.progress(0)
                 for idx, res in enumerate(raw_results):
-                    # 关键修改：传入 ss_api_key
+                    # 关键修改：传入内置的ss_api_key
                     cites = fetch_citations(res.entry_id, ss_key=ss_api_key)
                     results_with_cite.append({'obj': res, 'citations': cites})
                     progress_bar.progress((idx + 1) / len(raw_results))
@@ -376,7 +387,7 @@ with tab_search:
             st.subheader("📊 文献关联图谱 (Connected Graph)")
             
             with st.spinner("正在请求图谱数据..."):
-                # 关键修改：传入 ss_api_key
+                # 关键修改：传入内置的ss_api_key
                 g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
             
             if not g_data:
