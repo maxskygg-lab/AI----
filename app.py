@@ -610,7 +610,7 @@ with tab_chat:
                             f"你是一位科研助手。请基于以下资料回答用户问题。\n"
                             f"资料：\n{context}\n\n问题：{prompt}\n\n"
                             f"要求：数学公式用 $ 包裹，条理清晰。"
-                            f"如果资料中确实找不到答案，请明确说"资料不足"。"
+                            f"如果资料中确实找不到答案，请明确说【资料不足】。"
                         )
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         resp = llm.invoke(sys_prompt)
