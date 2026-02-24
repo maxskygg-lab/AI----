@@ -83,8 +83,8 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 v4")
 
 # ================= API Key =================
-USER_API_KEY = "3bc598c9bf544f4fb3ecb23d771994df.l7gZBe4mawinxS31"
-SS_API_KEY   = "8SwYzCFlra3KhzLD4A0KM2ejrtpz4FsGiGVx7xCb"
+USER_API_KEY = st.secrets["ZHIPU_API_KEY"]
+SS_API_KEY   = st.secrets["SS_API_KEY"]
 
 # ================= 3. 状态初始化 =================
 defaults = {
