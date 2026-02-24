@@ -61,10 +61,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.title("📖 AI 深度研读助手")
 
-# ================= API 密钥（请用 st.secrets 或 .env 管理，切勿上传到 GitHub）=================
-# 推荐做法：在 .streamlit/secrets.toml 中配置，然后用 st.secrets["ZHIPU_API_KEY"] 读取
-USER_API_KEY = st.secrets.get("ZHIPU_API_KEY", "your_zhipu_key_here")
-SS_API_KEY   = st.secrets.get("SS_API_KEY", "your_ss_key_here")
+USER_API_KEY = "3bc598c9bf544f4fb3ecb23d771994df.l7gZBe4mawinxS31"
+SS_API_KEY   = "8SwYzCFlra3KhzLD4A0KM2ejrtpz4FsGiGVx7xCb"
 
 # ================= 3. 状态初始化 =================
 defaults = {
