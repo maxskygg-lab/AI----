@@ -541,7 +541,7 @@ with tab_main:
 
             # ★ 升级 4：引用数过滤滑块
             min_cite_filter = st.slider(
-                "最低引用数过滤（过滤低价值节点）", 0, 200, 5, step=5,
+                "最低引用数过滤（过滤低价值节点）", 0, 200, 5, step=1,
                 key="graph_cite_filter"
             )
 
@@ -551,30 +551,69 @@ with tab_main:
             if not g_data:
                 st.warning("⚠️ 暂时无法获取图谱，请稍后再试。")
             else:
-                clicked_id, all_details = render_connected_graph(g_data, min_cite_filter=min_cite_filter)
-                seed_ss_id = g_data.get('paperId','root')
-                if seed_ss_id in all_details:
-                    all_details[seed_ss_id]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
+                # ★ 图谱 + 右侧信息面板并排
+                gcol_graph, gcol_info = st.columns([1.6, 1])
 
-                if clicked_id and clicked_id in all_details:
-                    info = all_details[clicked_id]
-                    with st.expander(f"📑 {info['title'][:60]}…", expanded=True):
-                        c1, c2 = st.columns(2)
-                        c1.metric("📅 年份", info['year'])
-                        c2.metric("🔥 引用", info['cites'])
-                        st.markdown(
-                            f"<div style='font-size:.84em;color:#444;max-height:140px;overflow-y:auto;'>"
-                            f"{info['abstract']}</div>", unsafe_allow_html=True
+                with gcol_graph:
+                    clicked_id, all_details = render_connected_graph(g_data, min_cite_filter=min_cite_filter)
+                    seed_ss_id = g_data.get('paperId','root')
+                    if seed_ss_id in all_details:
+                        all_details[seed_ss_id]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
+                    if not (clicked_id and clicked_id in all_details):
+                        st.caption(
+                            "👆 点击节点 → 右侧看详情 | "
+                            "🔴 当前  🟢 引用本文  🔵 本文引用"
                         )
+
+                with gcol_info:
+                    if clicked_id and clicked_id in all_details:
+                        info = all_details[clicked_id]
+                        st.markdown(
+                            f"""
+                            <div style="
+                                background:#f8fafc; border:1px solid #e2e8f0;
+                                border-left:4px solid #6366f1; border-radius:10px;
+                                padding:14px 16px; height:100%;
+                            ">
+                                <div style="font-size:.92em; font-weight:700;
+                                            color:#1e293b; margin-bottom:10px;
+                                            line-height:1.35;">
+                                    📑 {info['title']}
+                                </div>
+                                <div style="display:flex; gap:16px; margin-bottom:10px;">
+                                    <span style="background:#e0e7ff;color:#3730a3;
+                                                 padding:2px 10px; border-radius:12px;
+                                                 font-size:.8em; font-weight:600;">
+                                        📅 {info['year'] or '年份未知'}
+                                    </span>
+                                    <span style="background:#fee2e2;color:#991b1b;
+                                                 padding:2px 10px; border-radius:12px;
+                                                 font-size:.8em; font-weight:600;">
+                                        🔥 {info['cites']} 引用
+                                    </span>
+                                </div>
+                                <div style="font-size:.80em; color:#475569;
+                                            max-height:180px; overflow-y:auto;
+                                            line-height:1.55; margin-bottom:12px;">
+                                    {info['abstract'][:500]}{'…' if len(info['abstract'])>500 else ''}
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("")   # 留一点间距
+
                         target_topic = st.selectbox(
-                            "加入主题", list(st.session_state.topics.keys()),
+                            "加入主题",
+                            list(st.session_state.topics.keys()),
                             index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
-                            key="graph_topic_sel"
+                            key="graph_topic_sel",
+                            label_visibility="collapsed"
                         )
                         arxiv_id = info.get('arxiv_id')
-                        gc1, gc2, gc3 = st.columns(3)
-                        with gc1:
-                            if arxiv_id and st.button("⬇️ 下载入库", type="primary", use_container_width=True):
+                        ga, gb, gc = st.columns(3)
+                        with ga:
+                            if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
                                 with st.spinner("下载中..."):
                                     try:
                                         paper = next(arxiv.Search(id_list=[arxiv_id]).results())
@@ -583,20 +622,29 @@ with tab_main:
                                             st.success("✅ 入库成功！"); st.balloons()
                                     except Exception as e: st.error(str(e))
                             elif not arxiv_id:
-                                st.info("暂无 ArXiv 全文")
-                        with gc2:
-                            st.link_button("🌐 Semantic Scholar", info['url'], use_container_width=True)
-                        # ★ 升级 5：节点展开图谱
-                        with gc3:
-                            if info.get('arxiv_id') and st.button("🕸️ 展开子图谱", use_container_width=True):
+                                st.caption("暂无全文")
+                        with gb:
+                            st.link_button("🌐 SS", info['url'], use_container_width=True)
+                        with gc:
+                            if info.get('arxiv_id') and st.button("🕸️ 展开", use_container_width=True, key="ginfo_expand"):
                                 st.session_state.focus_paper_id = info['arxiv_id']
                                 st.rerun()
-                else:
-                    st.caption(
-                        "👆 点击节点查看详情 | "
-                        "🔴 当前论文  🟢 引用本文  🔵 本文引用 | "
-                        "节点越大 = 引用数越高"
-                    )
+                    else:
+                        # 空状态提示
+                        st.markdown(
+                            """
+                            <div style="
+                                background:#f1f5f9; border:1px dashed #cbd5e1;
+                                border-radius:10px; padding:24px 16px;
+                                text-align:center; color:#94a3b8; font-size:.85em;
+                                height:100%; min-height:220px;
+                                display:flex; align-items:center; justify-content:center;
+                            ">
+                                ← 点击左侧图谱中的<br>任意节点查看详情
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
         # ── 检索结果列表 ──
         if st.session_state.search_results:
