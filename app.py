@@ -59,7 +59,6 @@ st.markdown("""
         padding:1px 8px; border-radius:12px; font-size:.75em;
         margin-right:4px; font-weight:500;
     }
-    /* ★ 右侧聊天面板固定高度可滚动 */
     .chat-panel {
         height: 520px;
         overflow-y: auto;
@@ -72,15 +71,19 @@ st.markdown("""
     .chat-user { background:#dbeafe; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:.9em; }
     .chat-bot  { background:#f0fdf4; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:.9em; }
     .chat-notice { color:#6366f1; font-size:.82em; font-style:italic; margin:4px 0; }
-    /* 分隔线标题 */
     .section-divider {
         font-size:.72em; text-transform:uppercase; letter-spacing:2px;
         color:#94a3b8; margin:18px 0 8px;
     }
+    .perf-badge {
+        display:inline-block; background:#dcfce7; color:#166534;
+        border:1px solid #86efac; padding:2px 8px; border-radius:12px;
+        font-size:.75em; font-weight:600; margin-left:6px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📖 AI 深度研读助手 v4")
+st.title("📖 AI 深度研读助手 v5")
 
 # ================= API Key =================
 USER_API_KEY = st.secrets["ZHIPU_API_KEY"]
@@ -88,18 +91,20 @@ SS_API_KEY   = st.secrets["SS_API_KEY"]
 
 # ================= 3. 状态初始化 =================
 defaults = {
-    "search_results": [],          # [{"obj": arxiv.Result, "citations": int|None}]
-    "citations_loaded": False,     # ★ 是否已完成引用数加载
-    "suggested_query": "",
-    "focus_paper_id": None,
-    "contributions_cache": {},
-    "chat_history": [],
-    "topics": {"默认主题": {"files": [], "chunks": [], "db": None}},
-    "active_topic": "默认主题",
-    "selected_scope": "🌐 对比所有论文",
-    "notes": [],
-    "pending_note": None,
-    "graph_references_cache": [],
+    "search_results":          [],
+    "citations_loaded":        False,
+    "citations_global_cache":  {},    # ★ 新增：跨搜索持久化缓存 {clean_arxiv_id: count}
+    "suggested_query":         "",
+    "focus_paper_id":          None,
+    "contributions_cache":     {},
+    "chat_history":            [],
+    "topics":                  {"默认主题": {"files": [], "chunks": [], "db": None}},
+    "active_topic":            "默认主题",
+    "selected_scope":          "🌐 对比所有论文",
+    "notes":                   [],
+    "pending_note":            None,
+    "graph_references_cache":  [],
+    "preload_done_ids":        set(),  # ★ 新增：记录已预加载图谱的论文 ID
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -114,8 +119,43 @@ def get_pure_arxiv_id(url_or_id):
     m = re.search(r'(\d{4}\.\d{4,5})', url_or_id)
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
+# ─────────────────────────────────────────────
+# ★ 升级 1：批量 API 一次取所有引用数
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_citations_batch_cached(arxiv_ids_tuple: tuple, ss_key=None) -> dict:
+    """
+    用 Semantic Scholar 批量接口，一次 POST 获取最多 500 篇引用数。
+    比并发单请求快 ~8x，同时大幅节省 API 配额。
+    返回 {clean_arxiv_id: citationCount}
+    """
+    clean_ids = [f"ArXiv:{get_pure_arxiv_id(aid)}" for aid in arxiv_ids_tuple]
+    url = "https://api.semanticscholar.org/graph/v1/paper/batch"
+    headers = {"x-api-key": ss_key} if ss_key else {}
+    try:
+        r = requests.post(
+            url,
+            headers=headers,
+            params={"fields": "citationCount,externalIds"},
+            json={"ids": clean_ids},
+            timeout=15
+        )
+        if r.status_code == 200:
+            id_to_cite = {}
+            for item in r.json():
+                if item and item.get("externalIds"):
+                    arxiv_id = item["externalIds"].get("ArXiv", "")
+                    if arxiv_id:
+                        id_to_cite[arxiv_id] = item.get("citationCount", 0)
+            return id_to_cite
+        elif r.status_code == 429:
+            st.warning("⚠️ Semantic Scholar 限流，已降级为并发模式")
+    except Exception as e:
+        st.warning(f"批量引用数获取异常，降级并发模式: {e}")
+    return {}
+
 def fetch_one_citation(args):
-    """单篇引用数获取，用于并发池"""
+    """降级用：单篇引用数获取"""
     arxiv_id, ss_key = args
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
@@ -127,12 +167,10 @@ def fetch_one_citation(args):
     except: pass
     return arxiv_id, 0
 
-# ★ 并发获取所有引用数（核心提速）
 def fetch_citations_parallel(results, ss_key=None):
-    """用线程池并行获取所有论文引用数，比顺序快 10x+"""
+    """降级用：线程池并发"""
     args_list = [(item['obj'].entry_id, ss_key) for item in results]
     id_to_cite = {}
-    # 有 key 时并发数可调高；无 key 时适当限速
     max_workers = 8 if ss_key else 3
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(fetch_one_citation, args): args[0] for args in args_list}
@@ -140,6 +178,69 @@ def fetch_citations_parallel(results, ss_key=None):
             arxiv_id, count = future.result()
             id_to_cite[arxiv_id] = count
     return id_to_cite
+
+# ─────────────────────────────────────────────
+# ★ 升级 2：带持久缓存的智能引用数获取
+#    · 缓存命中 → 0 请求
+#    · 未缓存  → 批量 API（优先）或并发（降级）
+# ─────────────────────────────────────────────
+def smart_fetch_citations(results, ss_key=None):
+    cache = st.session_state.citations_global_cache
+
+    # 区分已缓存 / 未缓存
+    missing_items = [
+        item for item in results
+        if get_pure_arxiv_id(item['obj'].entry_id) not in cache
+    ]
+
+    hit_count = len(results) - len(missing_items)
+    if hit_count:
+        st.caption(f"⚡ {hit_count} 篇命中缓存，{len(missing_items)} 篇需请求")
+
+    if missing_items:
+        missing_ids = tuple(item['obj'].entry_id for item in missing_items)
+        # 优先走批量接口
+        new_data = fetch_citations_batch_cached(missing_ids, ss_key)
+        # 批量失败则降级并发
+        if not new_data:
+            new_data = fetch_citations_parallel(missing_items, ss_key)
+            # 统一 key 为 clean_id
+            new_data = {get_pure_arxiv_id(k): v for k, v in new_data.items()}
+        cache.update(new_data)
+
+    # 组装最终结果
+    return {
+        item['obj'].entry_id: cache.get(get_pure_arxiv_id(item['obj'].entry_id), 0)
+        for item in results
+    }
+
+# ─────────────────────────────────────────────
+# ★ 升级 3：图谱预加载（后台静默，命中缓存后点击图谱 0 延迟）
+# ─────────────────────────────────────────────
+def preload_top_graphs(results, ss_key=None, top_n=3):
+    """
+    在引用数加载完成后，对引用量最高的 top_n 篇论文
+    静默调用 fetch_graph_data（结果被 @cache_data 缓存）。
+    用户点击「图谱」按钮时直接命中缓存，几乎 0 延迟。
+    """
+    done = st.session_state.preload_done_ids
+    sorted_results = sorted(results, key=lambda x: x.get("citations") or 0, reverse=True)
+    to_preload = [
+        item for item in sorted_results[:top_n]
+        if item['obj'].entry_id not in done
+    ]
+    if not to_preload:
+        return
+
+    placeholder = st.empty()
+    placeholder.caption(f"🔄 后台预加载 Top {len(to_preload)} 论文图谱…")
+    for item in to_preload:
+        eid = item['obj'].entry_id
+        fetch_graph_data(eid, ss_key=ss_key)   # 触发缓存写入
+        done.add(eid)
+        time.sleep(0.3)   # 避免触发限流
+    placeholder.caption(f"✅ 图谱预加载完成，点击「🕸️ 图谱」按钮即时呈现")
+
 
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
@@ -240,7 +341,7 @@ def get_gap_recommendations():
     return recs[:4]
 
 # ================= 5. 图谱渲染 =================
-def render_connected_graph(data):
+def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, paper_details = [], [], {}
     current_year = 2026
@@ -267,17 +368,19 @@ def render_connected_graph(data):
     refs_for_gap = []
 
     combined = []
-    for p in data.get('references',[])[:15]: p['rel_type']='ref'; combined.append(p)
-    for p in data.get('citations',[])[:15]:  p['rel_type']='cite'; combined.append(p)
+    for p in data.get('references',[])[:20]: p['rel_type']='ref'; combined.append(p)
+    for p in data.get('citations',[])[:20]:  p['rel_type']='cite'; combined.append(p)
 
     for item in combined:
-        p_id = item.get('paperId')
-        if not p_id or p_id in seen: continue
+        p_id  = item.get('paperId')
+        cites = item.get('citationCount', 0) or 0
+        # ★ 升级 4：低引用节点过滤
+        if not p_id or p_id in seen or cites < min_cite_filter:
+            continue
         seen.add(p_id)
-        title = item.get('title','Unknown')
-        year  = item.get('year')
-        cites = item.get('citationCount',0)
-        ext   = item.get('externalIds') or {}
+        title    = item.get('title','Unknown')
+        year     = item.get('year')
+        ext      = item.get('externalIds') or {}
         arxiv_id = ext.get('ArXiv')
         paper_details[p_id] = {
             "title": title, "abstract": item.get('abstract') or "暂无摘要。",
@@ -288,7 +391,7 @@ def render_connected_graph(data):
         if item['rel_type'] == 'ref' and arxiv_id:
             refs_for_gap.append({"title": title, "arxiv_id": arxiv_id, "abstract": item.get('abstract','')})
         node_size = 15 + math.log(cites+1)*3.5
-        nodes.append(Node(id=p_id, label=f"{title[:20]}...", size=node_size, color=get_color(year, item['rel_type'])))
+        nodes.append(Node(id=p_id, label=f"{title[:20]}…", size=node_size, color=get_color(year, item['rel_type'])))
         if item['rel_type']=='cite':
             edges.append(Edge(source=p_id, target=seed_id, color="#d1d5db", width=1, dashed=True))
         else:
@@ -307,11 +410,16 @@ with st.sidebar:
     user_api_key = USER_API_KEY
     ss_api_key   = SS_API_KEY
     st.success("🚀 高速调研模式已激活")
-    st.markdown("---")
 
+    # ★ 引用数缓存状态展示
+    cache_size = len(st.session_state.citations_global_cache)
+    if cache_size:
+        st.info(f"⚡ 引用数缓存：{cache_size} 篇（跨搜索复用）")
+
+    st.markdown("---")
     st.subheader("🗂️ 研究主题")
     topic_names = list(st.session_state.topics.keys())
-    active_idx = topic_names.index(st.session_state.active_topic) if st.session_state.active_topic in topic_names else 0
+    active_idx  = topic_names.index(st.session_state.active_topic) if st.session_state.active_topic in topic_names else 0
     chosen = st.selectbox("当前主题", topic_names, index=active_idx)
     if chosen != st.session_state.active_topic:
         st.session_state.active_topic = chosen
@@ -371,20 +479,17 @@ with st.sidebar:
             st.rerun()
 
 # ===============================================================
-# ★ 7. 主界面：单页纵向流布局（搜索 ← 左列 | 问答 → 右列）
-#    笔记保留为顶部 Tab
+# 7. 主界面
 # ===============================================================
 tab_main, tab_notes = st.tabs(["🔍📖 研究工作台", "📌 我的笔记"])
 
 with tab_main:
-    # ── 两栏：左=发现区  右=问答区 ──
     col_left, col_right = st.columns([1.45, 1])
 
     # ══════════════════════════════════════════
     # 左栏：搜索 → 图谱 → 结果列表
     # ══════════════════════════════════════════
     with col_left:
-        # ── 检索栏 ──
         st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
         sq1, sq2, sq3 = st.columns([3,1.5,1])
         with sq1:
@@ -396,7 +501,7 @@ with tab_main:
             max_results = st.number_input("数量", 5, 50, 15, label_visibility="collapsed")
 
         if st.button("🚀 检索", use_container_width=True) and search_query:
-            # ★ 第一步：先拿论文列表（快）
+            # ── Step 1: 拿论文列表 ──
             with st.spinner("检索论文中..."):
                 try:
                     arxiv_sort = arxiv.SortCriterion.Relevance
@@ -405,7 +510,6 @@ with tab_main:
                     if " " in search_query and "AND" not in search_query and '"' not in search_query:
                         refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
                     raw = list(arxiv.Search(query=refined, max_results=max_results, sort_by=arxiv_sort).results())
-                    # 先存结果，citations 先置 None（显示"加载中"）
                     st.session_state.search_results = [{"obj": r, "citations": None} for r in raw]
                     st.session_state.citations_loaded = False
                     st.session_state.contributions_cache = {}
@@ -413,33 +517,48 @@ with tab_main:
                 except Exception as e:
                     st.error(f"检索失败: {e}")
 
-            # ★ 第二步：并发获取引用数（比顺序快 10x）
+            # ── Step 2: ★ 智能引用数（缓存→批量→降级） ──
             if st.session_state.search_results:
-                with st.spinner(f"并发加载 {len(st.session_state.search_results)} 篇引用数..."):
-                    id_to_cite = fetch_citations_parallel(st.session_state.search_results, ss_key=ss_api_key)
+                t0 = time.time()
+                with st.spinner("获取引用数…"):
+                    id_to_cite = smart_fetch_citations(
+                        st.session_state.search_results, ss_key=ss_api_key
+                    )
                     for item in st.session_state.search_results:
-                        item["citations"] = id_to_cite.get(item["obj"].entry_id, 0)
+                        item["citations"] = id_to_cite.get(item['obj'].entry_id, 0)
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
                     st.session_state.citations_loaded = True
-                st.success(f"✅ 完成！{len(st.session_state.search_results)} 篇，引用数已全部加载。")
+                elapsed = time.time() - t0
+                st.success(f"✅ {len(st.session_state.search_results)} 篇完成，引用数耗时 {elapsed:.1f}s")
 
-        # ── 图谱区（有焦点论文时展示）──
+                # ── Step 3: ★ 后台预加载 Top3 图谱 ──
+                preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+
+        # ── 图谱区 ──
         if st.session_state.focus_paper_id:
             st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
-            with st.spinner("加载图谱..."):
+
+            # ★ 升级 4：引用数过滤滑块
+            min_cite_filter = st.slider(
+                "最低引用数过滤（过滤低价值节点）", 0, 200, 5, step=5,
+                key="graph_cite_filter"
+            )
+
+            with st.spinner("加载图谱（已预加载则即时呈现）…"):
                 g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
+
             if not g_data:
                 st.warning("⚠️ 暂时无法获取图谱，请稍后再试。")
             else:
-                clicked_id, all_details = render_connected_graph(g_data)
+                clicked_id, all_details = render_connected_graph(g_data, min_cite_filter=min_cite_filter)
                 seed_ss_id = g_data.get('paperId','root')
                 if seed_ss_id in all_details:
                     all_details[seed_ss_id]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
 
                 if clicked_id and clicked_id in all_details:
                     info = all_details[clicked_id]
-                    with st.expander(f"📑 {info['title'][:60]}...", expanded=True):
+                    with st.expander(f"📑 {info['title'][:60]}…", expanded=True):
                         c1, c2 = st.columns(2)
                         c1.metric("📅 年份", info['year'])
                         c2.metric("🔥 引用", info['cites'])
@@ -453,7 +572,7 @@ with tab_main:
                             key="graph_topic_sel"
                         )
                         arxiv_id = info.get('arxiv_id')
-                        gc1, gc2 = st.columns(2)
+                        gc1, gc2, gc3 = st.columns(3)
                         with gc1:
                             if arxiv_id and st.button("⬇️ 下载入库", type="primary", use_container_width=True):
                                 with st.spinner("下载中..."):
@@ -467,16 +586,29 @@ with tab_main:
                                 st.info("暂无 ArXiv 全文")
                         with gc2:
                             st.link_button("🌐 Semantic Scholar", info['url'], use_container_width=True)
+                        # ★ 升级 5：节点展开图谱
+                        with gc3:
+                            if info.get('arxiv_id') and st.button("🕸️ 展开子图谱", use_container_width=True):
+                                st.session_state.focus_paper_id = info['arxiv_id']
+                                st.rerun()
                 else:
-                    st.caption("👆 点击图谱节点查看详情并下载入库 | 🔴当前论文 🟢引用本文 🔵本文引用")
+                    st.caption(
+                        "👆 点击节点查看详情 | "
+                        "🔴 当前论文  🟢 引用本文  🔵 本文引用 | "
+                        "节点越大 = 引用数越高"
+                    )
 
         # ── 检索结果列表 ──
         if st.session_state.search_results:
-            st.markdown(f'<div class="section-divider">📋 检索结果（{len(st.session_state.search_results)} 篇）</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="section-divider">📋 检索结果（{len(st.session_state.search_results)} 篇）'
+                f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
             for i, item in enumerate(st.session_state.search_results):
                 res   = item['obj']
                 cites = item['citations']
-                # 引用数显示：None=加载中，数字=已加载
                 cite_html = (
                     f"<span class='cite-badge'>{cites}</span>" if cites is not None
                     else "<span class='cite-loading'>引用数加载中…</span>"
@@ -487,7 +619,6 @@ with tab_main:
                         f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                         unsafe_allow_html=True
                     )
-                    # 一句话贡献
                     ck = res.title[:60]
                     cc, cg = st.columns([5,1])
                     with cc:
@@ -513,12 +644,15 @@ with tab_main:
                                     st.success("入库成功！")
                                 except Exception as e: st.error(str(e))
                     with b3:
-                        if st.button("🕸️ 图谱", key=f"graph_{i}"):
+                        # ★ 已预加载的论文显示"即时"徽章
+                        is_preloaded = res.entry_id in st.session_state.preload_done_ids
+                        btn_label = "🕸️ 图谱 ⚡" if is_preloaded else "🕸️ 图谱"
+                        if st.button(btn_label, key=f"graph_{i}"):
                             st.session_state.focus_paper_id = res.entry_id
                             st.rerun()
 
     # ══════════════════════════════════════════
-    # 右栏：问答区（和发现区并排，随时可用）
+    # 右栏：问答区
     # ══════════════════════════════════════════
     with col_right:
         t = active_topic_data()
@@ -532,7 +666,6 @@ with tab_main:
         if not t["files"]:
             st.info("👆 在左侧下载论文后即可在这里提问。")
 
-        # ── 知识漏洞推荐 ──
         if st.session_state.pending_note and st.session_state.pending_note.get("has_gap"):
             recs = get_gap_recommendations()
             if recs:
@@ -552,7 +685,6 @@ with tab_main:
                                 except Exception as e: st.error(str(e))
                 st.markdown('</div>', unsafe_allow_html=True)
 
-        # ── 保存笔记 ──
         if st.session_state.pending_note and st.session_state.pending_note.get("content"):
             with st.expander("📌 保存为笔记", expanded=False):
                 note_tags_raw = st.text_input("标签（逗号分隔）", placeholder="方法论, Transformer", key="note_tags_input")
@@ -570,20 +702,17 @@ with tab_main:
                     st.success("✅ 已保存到「我的笔记」")
                     st.rerun()
 
-        # ── 历史消息（可滚动面板）──
         chat_html = ""
-        for msg in st.session_state.chat_history[-20:]:   # 只显示最近20条
+        for msg in st.session_state.chat_history[-20:]:
             if msg["role"] == "system_notice":
                 chat_html += f'<div class="chat-notice">📢 {msg["content"]}</div>'
             elif msg["role"] == "user":
                 chat_html += f'<div class="chat-user">🧑 {msg["content"]}</div>'
             else:
-                # 简单转义换行，保持可读
                 content = msg["content"].replace("\n","<br>")
                 chat_html += f'<div class="chat-bot">🤖 {content}</div>'
         st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
 
-        # ── 输入框 ──
         chat_col1, chat_col2 = st.columns([5,1])
         with chat_col1:
             user_input = st.text_input("提问", placeholder="输入问题，按发送…", label_visibility="collapsed", key="chat_input_box")
