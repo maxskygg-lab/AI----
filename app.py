@@ -130,23 +130,63 @@ def get_pure_arxiv_id(url_or_id):
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
 def convert_to_excel(results):
+    # 1. 自动补全缺失的核心贡献 (仅针对当前加载的结果)
+    # 我们只对那些还没生成过摘要的论文调用 AI，节省 Token
+    missing_items = [
+        item for item in results 
+        if item['obj'].title[:60] not in st.session_state.contributions_cache
+    ]
+    
+    if missing_items:
+        with st.spinner(f"正在自动提取 {len(missing_items)} 篇论文的核心贡献..."):
+            # 使用 ThreadPoolExecutor 并行处理，速度比一个一个点快得多
+            def process_item(item):
+                res = item['obj']
+                # 调用你现有的分析函数（请确保 get_one_line_contribution 函数已定义）
+                get_one_line_contribution(res.summary, res.title, USER_API_KEY)
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                executor.map(process_item, missing_items)
+
+    # 2. 构造数据列表
     data = []
     for item in results:
         res = item['obj']
-        contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
+        ck = res.title[:60]
+        # 现在这里一定能拿到摘要了
+        contrib = st.session_state.contributions_cache.get(ck, "提取失败")
+        
         data.append({
             "标题": res.title,
             "作者": ", ".join([a.name for a in res.authors]),
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
-            "核心贡献": contrib,
+            "AI核心贡献": contrib,
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
+    
+    # 3. 生成 Excel（带排版优化）
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Search_Results')
+        df.to_excel(writer, index=False, sheet_name='论文列表')
+        workbook  = writer.book
+        worksheet = writer.sheets['论文列表']
+        
+        wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top', 'align': 'left', 'font_size': 10})
+        
+        # 设置排版宽度
+        worksheet.set_column('A:A', 35, wrap_format) # 标题
+        worksheet.set_column('B:B', 20, wrap_format) # 作者
+        worksheet.set_column('C:D', 10, wrap_format) # 年份/引用
+        worksheet.set_column('E:E', 50, wrap_format) # 核心贡献 (加宽，方便阅读)
+        worksheet.set_column('F:F', 15, wrap_format) # 链接
+        worksheet.set_column('G:G', 50, wrap_format) # 摘要
+        
+        # 自动添加筛选器
+        worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
+
     return output.getvalue()
 
 
@@ -989,4 +1029,5 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
