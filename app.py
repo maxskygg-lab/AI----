@@ -288,51 +288,54 @@ def detect_knowledge_gap(answer_text, docs):
         if s.lower() in answer_text.lower(): return True
     return False
 
-def safe_retrieve_docs(db, query: str, scope: str, k: int = 8, fetch_k: int = 40):
+def safe_retrieve_docs(db, query: str, scope: str, k: int = 8, fetch_k: int = 60, per_paper_min: int = 2):
     """
     兼容 FAISS：先取候选，再手动按 metadata['source_paper'] 过滤
-    返回：docs（按相似度排序）
+    - scope == 单篇：只返回该论文
+    - scope == 对比所有论文：尽量保证每篇论文至少拿到 per_paper_min 个片段，再补齐到 k
     """
     if db is None:
         return []
 
     pairs = db.similarity_search_with_score(query, k=fetch_k)
+    low_info = ["references", "bibliography", "acknowledg", "table of contents", "contents"]
+pairs = [(d, s) for (d, s) in pairs if not any(w in d.page_content.lower()[:400] for w in low_info)]
+    # pairs: [(Document, score)] score 越小越相似
 
     if scope != "🌐 对比所有论文":
         pairs = [(d, s) for (d, s) in pairs if d.metadata.get("source_paper") == scope]
+        pairs.sort(key=lambda x: x[1])
+        return [d for (d, s) in pairs[:k]]
 
-    # 兜底：过滤后太少时再拉一次（防止误判“找不到”）
-    if scope != "🌐 对比所有论文" and len(pairs) < max(3, k // 2):
-        pairs_all = db.similarity_search_with_score(query, k=fetch_k)
-        pairs = [(d, s) for (d, s) in pairs_all if d.metadata.get("source_paper") == scope]
-
-    pairs.sort(key=lambda x: x[1])
-    return [d for (d, s) in pairs[:k]]
-
-
-def ensure_multi_paper_coverage(docs, min_papers: int = 2):
-    """
-    对比所有论文时：尽量保证命中来自多篇论文，避免结果全来自同一篇。
-    """
-    if not docs:
-        return docs
-
-    seen = set()
-    for d in docs:
-        seen.add(d.metadata.get("source_paper", "?"))
-    if len(seen) >= min_papers:
-        return docs
-
-    out, seen2 = [], set()
-    for d in docs:
+    # ===== 对比所有论文：按论文分桶 + 最小配额 =====
+    buckets = {}
+    for d, s in pairs:
         p = d.metadata.get("source_paper", "?")
-        if p not in seen2:
-            out.append(d); seen2.add(p)
-    for d in docs:
-        if len(out) >= len(docs):
+        buckets.setdefault(p, []).append((d, s))
+
+    # 每桶按相似度排序
+    for p in buckets:
+        buckets[p].sort(key=lambda x: x[1])
+
+    # 先从每篇论文取 per_paper_min 个（最多取到 k）
+    out = []
+    used = set()
+    papers = [p for p in buckets.keys() if p != "?"] + (["?"] if "?" in buckets else [])
+    for p in papers:
+        for d, s in buckets[p][:per_paper_min]:
+            if id(d) not in used:
+                out.append(d); used.add(id(d))
+            if len(out) >= k:
+                return out
+
+    # 不足则全局补齐（按相似度）
+    pairs.sort(key=lambda x: x[1])
+    for d, s in pairs:
+        if id(d) in used:
+            continue
+        out.append(d); used.add(id(d))
+        if len(out) >= k:
             break
-        if d not in out:
-            out.append(d)
     return out
 
 def get_gap_recommendations():
@@ -782,11 +785,11 @@ with tab_read:
             st.session_state.chat_history.append({"role":"user","content":prompt})
             with st.spinner("思考中..."):
                 try:
-                    sk = 15 if "精读" in reading_mode else 8
+                   sk = 18 if "精读" in reading_mode else (14 if scope == "🌐 对比所有论文" else 8)
                     scope = st.session_state.selected_scope
 
                     # ✅ FAISS 不可靠 filter：改为手动过滤 + 对比覆盖
-                    docs = safe_retrieve_docs(t["db"], prompt, scope=scope, k=sk, fetch_k=60)
+                    docs = safe_retrieve_docs(t["db"], prompt, scope=scope, k=sk, fetch_k=120, per_paper_min=2)
                     if scope == "🌐 对比所有论文":
                         docs = ensure_multi_paper_coverage(docs, min_papers=2)
 
@@ -986,3 +989,4 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
