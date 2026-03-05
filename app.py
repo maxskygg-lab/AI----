@@ -113,6 +113,8 @@ defaults = {
     "preload_done_ids":       set(),
     "trackers":               {},   # { kw: {check_interval_h, last_checked, seen_ids, new_papers} }
     "tracker_total_new":      0,
+    "show_sources":           True,
+    "compact_mode":           False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -285,6 +287,53 @@ def detect_knowledge_gap(answer_text, docs):
     for s in sigs:
         if s.lower() in answer_text.lower(): return True
     return False
+
+def safe_retrieve_docs(db, query: str, scope: str, k: int = 8, fetch_k: int = 40):
+    """
+    兼容 FAISS：先取候选，再手动按 metadata['source_paper'] 过滤
+    返回：docs（按相似度排序）
+    """
+    if db is None:
+        return []
+
+    pairs = db.similarity_search_with_score(query, k=fetch_k)
+
+    if scope != "🌐 对比所有论文":
+        pairs = [(d, s) for (d, s) in pairs if d.metadata.get("source_paper") == scope]
+
+    # 兜底：过滤后太少时再拉一次（防止误判“找不到”）
+    if scope != "🌐 对比所有论文" and len(pairs) < max(3, k // 2):
+        pairs_all = db.similarity_search_with_score(query, k=fetch_k)
+        pairs = [(d, s) for (d, s) in pairs_all if d.metadata.get("source_paper") == scope]
+
+    pairs.sort(key=lambda x: x[1])
+    return [d for (d, s) in pairs[:k]]
+
+
+def ensure_multi_paper_coverage(docs, min_papers: int = 2):
+    """
+    对比所有论文时：尽量保证命中来自多篇论文，避免结果全来自同一篇。
+    """
+    if not docs:
+        return docs
+
+    seen = set()
+    for d in docs:
+        seen.add(d.metadata.get("source_paper", "?"))
+    if len(seen) >= min_papers:
+        return docs
+
+    out, seen2 = [], set()
+    for d in docs:
+        p = d.metadata.get("source_paper", "?")
+        if p not in seen2:
+            out.append(d); seen2.add(p)
+    for d in docs:
+        if len(out) >= len(docs):
+            break
+        if d not in out:
+            out.append(d)
+    return out
 
 def get_gap_recommendations():
     loaded = set()
@@ -698,6 +747,19 @@ with tab_read:
                     st.session_state.pending_note = None
                     st.success("✅ 已保存到「我的笔记」"); st.rerun()
 
+        cA, cB, cC, cD = st.columns([1,1,1,2])
+        with cA:
+            if st.button("🧹 清空对话", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.pending_note = None
+                st.rerun()
+        with cB:
+            st.session_state.show_sources = st.toggle("显示引用", value=st.session_state.show_sources)
+        with cC:
+            st.session_state.compact_mode = st.toggle("紧凑模式", value=st.session_state.compact_mode)
+        with cD:
+            st.caption("提示：对比模式会输出表格对照，并标注来源页码")
+
         chat_html = ""
         for msg in st.session_state.chat_history[-20:]:
             if msg["role"] == "system_notice":
@@ -722,8 +784,12 @@ with tab_read:
                 try:
                     sk = 15 if "精读" in reading_mode else 8
                     scope = st.session_state.selected_scope
-                    fd = {"source_paper": scope} if scope != "🌐 对比所有论文" else None
-                    docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
+
+                    # ✅ FAISS 不可靠 filter：改为手动过滤 + 对比覆盖
+                    docs = safe_retrieve_docs(t["db"], prompt, scope=scope, k=sk, fetch_k=60)
+                    if scope == "🌐 对比所有论文":
+                        docs = ensure_multi_paper_coverage(docs, min_papers=2)
+
                     if not docs:
                         answer = "未找到相关内容，请尝试换个问法。"
                     else:
@@ -731,14 +797,42 @@ with tab_read:
                             f"📄【{d.metadata.get('source_paper','?')} P{d.metadata.get('page',0)+1}】:\n{d.page_content}"
                             for d in docs
                         ])
-                        sys_p = (
-                            "你是一位科研助手。请基于以下资料回答用户问题。\n"
-                            f"资料：\n{context}\n\n问题：{prompt}\n\n"
-                            "要求：数学公式用 $ 包裹，条理清晰。"
-                            "如果资料中确实找不到答案，请明确说【资料不足】。"
-                        )
+
+                        # ✅ 对比所有论文：强制结构化对照输出
+                        if scope == "🌐 对比所有论文":
+                            sys_p = (
+                                "你是一位科研对比分析助手。请严格基于【资料】回答问题。\n\n"
+                                "输出要求：\n"
+                                "1) 先给出一句话结论。\n"
+                                "2) 然后用 Markdown 表格对比不同论文：列至少包含【论文】【核心方法/假设】【关键贡献】【局限/适用条件】【与你问题的相关性】。\n"
+                                "3) 每条结论后用括号标注来源，如（论文名 P3）。不要编造。\n"
+                                "4) 若资料不足，明确输出【资料不足】并说明缺什么。\n\n"
+                                f"资料：\n{context}\n\n问题：{prompt}\n"
+                                "数学公式用 $ 包裹，条理清晰。"
+                            )
+                        else:
+                            sys_p = (
+                                "你是一位科研助手。请基于以下资料回答用户问题。\n"
+                                f"资料：\n{context}\n\n问题：{prompt}\n\n"
+                                "要求：数学公式用 $ 包裹，条理清晰。"
+                                "如果资料中确实找不到答案，请明确说【资料不足】。"
+                            )
+
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         answer = fix_latex(llm.invoke(sys_p).content)
+
+                        # ✅ 可选：把来源列表作为系统提示插入对话（更可信）
+                        if st.session_state.show_sources:
+                            src_lines = []
+                            for d in docs[:10]:
+                                src_lines.append(
+                                    f"- {d.metadata.get('source_paper','?')} · P{d.metadata.get('page',0)+1}"
+                                )
+                            st.session_state.chat_history.append({
+                                "role": "system_notice",
+                                "content": "📎 本次引用来源：\n" + "\n".join(src_lines)
+                            })
+
                     st.session_state.chat_history.append({"role":"assistant","content":answer})
                     st.session_state.pending_note = {"content":answer,"question":prompt,
                                                      "has_gap":detect_knowledge_gap(answer, docs if docs else [])}
