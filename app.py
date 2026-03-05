@@ -706,22 +706,23 @@ with tab_read:
         f'<span class="topic-badge">🗂️ {st.session_state.active_topic}</span> · {len(t["files"])} 篇入库</div>',
         unsafe_allow_html=True
     )
-    rc1,rc2 = st.columns([2,3])
+    rc1, rc2 = st.columns([2, 3])
     with rc1:
-        reading_mode = st.radio("模式",["🟢 快速问答","📖 逐段精读"], horizontal=True)
+        reading_mode = st.radio("模式", ["🟢 快速问答", "📖 逐段精读"], horizontal=True)
     with rc2:
         if t["files"]:
-            st.session_state.selected_scope = st.selectbox("专注范围",["🌐 对比所有论文"]+t["files"])
+            st.session_state.selected_scope = st.selectbox("专注范围", ["🌐 对比所有论文"] + t["files"])
 
     if not t["files"]:
         st.info("📥 请先在「学术检索 & 图谱」标签页下载论文，或在左侧侧边栏上传 PDF。")
     else:
+        # 知识漏洞推荐逻辑
         if st.session_state.pending_note and st.session_state.pending_note.get("has_gap"):
             recs = get_gap_recommendations()
             if recs:
                 st.markdown('<div class="gap-box"><b>🔍 知识漏洞推荐</b></div>', unsafe_allow_html=True)
                 for r in recs:
-                    rx1,rx2 = st.columns([5,1])
+                    rx1, rx2 = st.columns([5, 1])
                     with rx1: st.caption(r['title'])
                     with rx2:
                         if r.get('arxiv_id') and st.button("⬇️", key=f"gap_{r['arxiv_id']}"):
@@ -730,9 +731,12 @@ with tab_read:
                                     paper = next(arxiv.Search(id_list=[r['arxiv_id']]).results())
                                     pdf_path = paper.download_pdf(dirpath=tempfile.gettempdir())
                                     process_and_add_to_topic(pdf_path, r['title'], user_api_key)
-                                    st.success("已入库！"); st.rerun()
-                                except Exception as e: st.error(str(e))
+                                    st.success("已入库！")
+                                    st.rerun()
+                                except Exception as e: 
+                                    st.error(str(e))
 
+        # 保存笔记逻辑
         if st.session_state.pending_note and st.session_state.pending_note.get("content"):
             with st.expander("📌 保存为笔记", expanded=False):
                 note_tags_raw = st.text_input("标签（逗号分隔）", placeholder="方法论, Transformer", key="note_tags_input")
@@ -741,15 +745,17 @@ with tab_read:
                     st.session_state.notes.append({
                         "id": str(uuid.uuid4())[:8],
                         "content": st.session_state.pending_note["content"],
-                        "question": st.session_state.pending_note.get("question",""),
+                        "question": st.session_state.pending_note.get("question", ""),
                         "tags": tags,
                         "topic": st.session_state.active_topic,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     })
                     st.session_state.pending_note = None
-                    st.success("✅ 已保存到「我的笔记」"); st.rerun()
+                    st.success("✅ 已保存到「我的笔记」")
+                    st.rerun()
 
-        cA, cB, cC, cD = st.columns([1,1,1,2])
+        # 功能按钮栏
+        cA, cB, cC, cD = st.columns([1, 1, 1, 2])
         with cA:
             if st.button("🧹 清空对话", use_container_width=True):
                 st.session_state.chat_history = []
@@ -762,6 +768,7 @@ with tab_read:
         with cD:
             st.caption("提示：对比模式会输出表格对照，并标注来源页码")
 
+        # 聊天面板渲染
         chat_html = ""
         for msg in st.session_state.chat_history[-20:]:
             if msg["role"] == "system_notice":
@@ -772,23 +779,27 @@ with tab_read:
                 chat_html += f'<div class="chat-bot">🤖 {msg["content"].replace(chr(10),"<br>")}</div>'
         st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
 
-        ci1,ci2 = st.columns([6,1])
+        # 输入框
+        ci1, ci2 = st.columns([6, 1])
         with ci1:
             user_input = st.text_input("提问", placeholder="输入问题，按发送…",
                                        label_visibility="collapsed", key="chat_input_box")
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
+        # 发送逻辑处理
         if send_btn and user_input.strip():
             prompt = user_input.strip()
-            st.session_state.chat_history.append({"role":"user","content":prompt})
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.spinner("思考中..."):
                 try:
-                   sk = 18 if "精读" in reading_mode else (14 if scope == "🌐 对比所有论文" else 8)
+                    # 修复点：确保变量定义顺序一致，且缩进对齐
                     scope = st.session_state.selected_scope
+                    sk = 18 if "精读" in reading_mode else (14 if scope == "🌐 对比所有论文" else 8)
 
-                    # ✅ FAISS 不可靠 filter：改为手动过滤 + 对比覆盖
+                    # 检索文档
                     docs = safe_retrieve_docs(t["db"], prompt, scope=scope, k=sk, fetch_k=120, per_paper_min=2)
+                    
                     if scope == "🌐 对比所有论文":
                         docs = ensure_multi_paper_coverage(docs, min_papers=2)
 
@@ -800,7 +811,6 @@ with tab_read:
                             for d in docs
                         ])
 
-                        # ✅ 对比所有论文：强制结构化对照输出
                         if scope == "🌐 对比所有论文":
                             sys_p = (
                                 "你是一位科研对比分析助手。请严格基于【资料】回答问题。\n\n"
@@ -823,24 +833,22 @@ with tab_read:
                         llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         answer = fix_latex(llm.invoke(sys_p).content)
 
-                        # ✅ 可选：把来源列表作为系统提示插入对话（更可信）
                         if st.session_state.show_sources:
-                            src_lines = []
-                            for d in docs[:10]:
-                                src_lines.append(
-                                    f"- {d.metadata.get('source_paper','?')} · P{d.metadata.get('page',0)+1}"
-                                )
+                            src_lines = [f"- {d.metadata.get('source_paper','?')} · P{d.metadata.get('page',0)+1}" for d in docs[:10]]
                             st.session_state.chat_history.append({
                                 "role": "system_notice",
                                 "content": "📎 本次引用来源：\n" + "\n".join(src_lines)
                             })
 
-                    st.session_state.chat_history.append({"role":"assistant","content":answer})
-                    st.session_state.pending_note = {"content":answer,"question":prompt,
-                                                     "has_gap":detect_knowledge_gap(answer, docs if docs else [])}
+                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                    st.session_state.pending_note = {
+                        "content": answer, 
+                        "question": prompt,
+                        "has_gap": detect_knowledge_gap(answer, docs if docs else [])
+                    }
                     st.rerun()
-                except Exception as e: st.error(f"生成出错: {e}")
-
+                except Exception as e:
+                    st.error(f"生成出错: {e}")
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
 # ══════════════════════════════════════════
@@ -988,4 +996,5 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
