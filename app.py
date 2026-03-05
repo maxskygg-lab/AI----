@@ -474,7 +474,8 @@ with st.sidebar:
 _n_new = st.session_state.tracker_total_new
 _track_label = f"🔔 追踪提醒 ({_n_new} 新)" if _n_new > 0 else "🔔 关键词追踪"
 
-tab_main, tab_read, tab_track, tab_notes = st.tabs([
+# 关键修复点：将 tab_main 改为 tab_search
+tab_search, tab_read, tab_track, tab_notes = st.tabs([
     "🔍 学术检索 & 图谱", "📖 研读空间", _track_label, "📌 我的笔记"
 ])
 
@@ -891,6 +892,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
