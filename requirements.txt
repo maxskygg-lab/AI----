@@ -11,5 +11,6 @@ httpx
 sniffio
 requests
 streamlit_agraph
+xlsxwriter
 
 
