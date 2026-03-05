@@ -130,25 +130,31 @@ def get_pure_arxiv_id(url_or_id):
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
 def convert_to_excel(results):
-    data = []
-    for item in results:
-        res = item['obj']
-        contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
-        data.append({
-            "标题": res.title,
-            "作者": ", ".join([a.name for a in res.authors]),
-            "年份": res.published.year,
-            "引用数": item.get('citations', 0),
-            "核心贡献": contrib,
-            "链接": res.entry_id,
-            "摘要": res.summary.replace('\n', ' ')
-        })
-    df = pd.DataFrame(data)
+    # ... 前面构建 data 列表和 df 的逻辑保持不变 ...
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Search_Results')
+        df.to_excel(writer, index=False, sheet_name='检索结果')
+        workbook  = writer.book
+        worksheet = writer.sheets['检索结果']
+        
+        # 定义清楚的排版格式
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        cell_fmt   = workbook.add_format({'border': 1, 'valign': 'top', 'text_wrap': True}) # 自动换行是关键
+        num_fmt    = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        
+        # 设置列宽（解决排版不清楚的问题）
+        worksheet.set_column('A:A', 40, cell_fmt)   # 标题
+        worksheet.set_column('B:B', 20, cell_fmt)   # 作者
+        worksheet.set_column('C:D', 10, num_fmt)    # 年份/引用
+        worksheet.set_column('E:E', 50, cell_fmt)   # 核心贡献 (加宽并换行)
+        worksheet.set_column('F:F', 30, cell_fmt)   # 链接
+        worksheet.set_column('G:G', 60, cell_fmt)   # 摘要 (最宽)
+        
+        # 强制写入表头样式
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_fmt)
+            
     return output.getvalue()
-
 
 # ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
@@ -684,27 +690,33 @@ with tab_main:
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
         # 修改点：加载更多功能
-        if st.session_state.search_generator:
-            st.markdown("---")
-            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-                with st.spinner("正在拉取更多论文..."):
-                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                    if more_raw:
-                        new_results = [{"obj":r,"citations":None} for r in more_raw]
-                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
-                        for item in new_results:
-                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                        
-                        st.session_state.search_results.extend(new_results)
-                        
-                        # 如果选择了按引用量排序，新加入后统一重新排序
-                        if "引用量" in sort_mode:
-                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                        
-                        st.rerun()
-                    else:
-                        st.info("✨ 到底啦，没有更多匹配的论文了。")
-
+       if st.session_state.search_generator:
+        st.markdown("---")
+        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+            # 修改点 1：更新提示语，明确包含 AI 分析过程
+            with st.spinner("正在拉取并自动分析摘要..."):
+                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                if more_raw:
+                    new_results = [{"obj":r,"citations":None} for r in more_raw]
+                    
+                    # 获取引用数
+                    id2c = smart_fetch_citations(new_results, ss_key=SS_API_KEY)
+                    for item in new_results:
+                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                    
+                    # 修改点 2：在加入全局列表前或后，立即执行批量摘要生成
+                    # 传入新拉取的 new_results 即可
+                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
+                    
+                    st.session_state.search_results.extend(new_results)
+                    
+                    if "引用量" in sort_mode:
+                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    
+                    # 修改点 3：确保 rerun 在所有逻辑（包括摘要生成）完成后执行
+                    st.rerun()
+                else:
+                    st.info("✨ 到底啦，没有更多匹配的论文了。")
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
@@ -989,3 +1001,4 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
