@@ -130,31 +130,70 @@ def get_pure_arxiv_id(url_or_id):
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
 def convert_to_excel(results):
-    # ... 前面构建 data 列表和 df 的逻辑保持不变 ...
+    """优化排版：支持自动换行、固定列宽、AI贡献集成"""
+    data = []
+    for item in results:
+        res = item['obj']
+        # 从缓存中获取AI生成的核心贡献，若无则显示“未生成”
+        contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
+        data.append({
+            "标题": res.title,
+            "作者": ", ".join([a.name for a in res.authors]),
+            "年份": res.published.year,
+            "引用数": item.get('citations', 0),
+            "核心贡献 (AI)": contrib,
+            "链接": res.entry_id,
+            "摘要": res.summary.replace('\n', ' ')
+        })
+    
+    df = pd.DataFrame(data)
     output = io.BytesIO()
+    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='检索结果')
         workbook  = writer.book
         worksheet = writer.sheets['检索结果']
         
-        # 定义清楚的排版格式
+        # 定义排版格式
         header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        cell_fmt   = workbook.add_format({'border': 1, 'valign': 'top', 'text_wrap': True}) # 自动换行是关键
+        cell_fmt   = workbook.add_format({'border': 1, 'valign': 'top', 'text_wrap': True}) # 自动换行
         num_fmt    = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
         
-        # 设置列宽（解决排版不清楚的问题）
+        # 设置列宽
         worksheet.set_column('A:A', 40, cell_fmt)   # 标题
         worksheet.set_column('B:B', 20, cell_fmt)   # 作者
         worksheet.set_column('C:D', 10, num_fmt)    # 年份/引用
-        worksheet.set_column('E:E', 50, cell_fmt)   # 核心贡献 (加宽并换行)
+        worksheet.set_column('E:E', 50, cell_fmt)   # 核心贡献
         worksheet.set_column('F:F', 30, cell_fmt)   # 链接
-        worksheet.set_column('G:G', 60, cell_fmt)   # 摘要 (最宽)
+        worksheet.set_column('G:G', 60, cell_fmt)   # 摘要
         
-        # 强制写入表头样式
+        # 写入带样式的表头
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_fmt)
             
     return output.getvalue()
+
+# ── 核心新增：自动批处理首屏 50 篇摘要 ──
+def auto_batch_contributions(results, api_key, limit=50):
+    """默认自动处理前50篇的摘要生成"""
+    to_process = results[:limit]
+    # 过滤掉缓存中已有的，避免重复请求
+    pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.contributions_cache]
+    
+    if not pending:
+        return
+    
+    # 使用多线程并行调用接口，显著缩短等待时间
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {
+            pool.submit(get_one_line_contribution, p['obj'].summary, p['obj'].title, api_key): p 
+            for p in pending
+        }
+        for future in as_completed(futures):
+            try:
+                future.result() # 内部已写入 session_state.contributions_cache
+            except:
+                pass
 
 # ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
@@ -543,14 +582,24 @@ with tab_main:
 
         if st.session_state.search_results:
             t0 = time.time()
-            with st.spinner("获取引用数…"):
+            # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
+            with st.spinner("同步引用数并自动分析前50篇摘要..."):
+                # 1. 获取引用数
                 id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
                 for item in st.session_state.search_results:
                     item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                
+                # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
-                    st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
+                    st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                
+                # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
+                # 确保 USER_API_KEY 已在 secrets 或上方定义
+                auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
+                
                 st.session_state.citations_loaded = True
-            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
+            
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，自动分析耗时 {time.time()-t0:.1f}s")
             preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
@@ -690,31 +739,39 @@ with tab_main:
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
        # 这里的缩进必须与上方的 for 循环对齐
-        if st.session_state.search_generator:
-            st.markdown("---")
-            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-                with st.spinner("正在拉取并自动分析摘要..."):
-                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                    if more_raw:
-                        new_results = [{"obj": r, "citations": None} for r in more_raw]
-                        
-                        # 获取引用数 (注意使用小写的 ss_api_key)
-                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
-                        for item in new_results:
-                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                        
-                        # 自动生成摘要
-                        auto_batch_contributions(new_results, USER_API_KEY, limit=50)
-                        
-                        st.session_state.search_results.extend(new_results)
-                        
-                        # 确保 sort_mode 变量在上下文中已定义
-                        if "引用量" in sort_mode:
-                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                        
-                        st.rerun()
-                    else:
-                        st.info("✨ 到底啦，没有更多匹配的论文了。")
+        # 修改点：加载更多功能（自动分析前 50 篇）
+    if st.session_state.search_generator:
+        st.markdown("---")
+        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+            # 统一提示语
+            with st.spinner("正在拉取并自动分析新论文摘要..."):
+                # 从 generator 中切取下 50 篇
+                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                
+                if more_raw:
+                    # 1. 封装新结果
+                    new_results = [{"obj": r, "citations": None} for r in more_raw]
+                    
+                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
+                    id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
+                    for item in new_results:
+                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                    
+                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
+                    # 确保 auto_batch_contributions 已在工具函数区定义
+                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
+                    
+                    # 4. 合并到全局搜索结果中
+                    st.session_state.search_results.extend(new_results)
+                    
+                    # 5. 如果当前是引用量排序模式，则重新全局排序
+                    if "引用量" in sort_mode:
+                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    
+                    # 6. 刷新页面显示结果
+                    st.rerun()
+                else:
+                    st.info("✨ 到底啦，没有更多匹配的论文了。")
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
@@ -999,6 +1056,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
