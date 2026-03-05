@@ -298,8 +298,7 @@ def safe_retrieve_docs(db, query: str, scope: str, k: int = 8, fetch_k: int = 60
         return []
 
     pairs = db.similarity_search_with_score(query, k=fetch_k)
-    low_info = ["references", "bibliography", "acknowledg", "table of contents", "contents"]
-pairs = [(d, s) for (d, s) in pairs if not any(w in d.page_content.lower()[:400] for w in low_info)]
+    
     # pairs: [(Document, score)] score 越小越相似
 
     if scope != "🌐 对比所有论文":
