@@ -1,5 +1,6 @@
 import streamlit as st
-import os, time, tempfile, re, math, uuid, itertools
+import pandas as pd
+import os, time, tempfile, re, math, uuid, itertools,io
 import arxiv, requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -127,6 +128,27 @@ def active_topic_data():
 def get_pure_arxiv_id(url_or_id):
     m = re.search(r'(\d{4}\.\d{4,5})', url_or_id)
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
+
+def convert_to_excel(results):
+    data = []
+    for item in results:
+        res = item['obj']
+        contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
+        data.append({
+            "标题": res.title,
+            "作者": ", ".join([a.name for a in res.authors]),
+            "年份": res.published.year,
+            "引用数": item.get('citations', 0),
+            "核心贡献": contrib,
+            "链接": res.entry_id,
+            "摘要": res.summary.replace('\n', ' ')
+        })
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Search_Results')
+    return output.getvalue()
+
 
 # ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
@@ -612,6 +634,15 @@ with tab_main:
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
+
+        st.download_button(
+            label="📥 点击下载当前已加载论文 (Excel)",
+            data=convert_to_excel(st.session_state.search_results),
+            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.markdown("---")
+        
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
@@ -958,3 +989,4 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
