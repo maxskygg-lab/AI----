@@ -556,37 +556,31 @@ with tab_main:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("检索论文中..."):
-            try:
-                asort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                refined = search_query
-                if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-                
-                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
-                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
-                st.session_state.search_generator = raw_gen
-                raw = list(itertools.islice(raw_gen, 50))
-                
-                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-                st.session_state.citations_loaded = False
-                st.session_state.contributions_cache = {}
-                st.session_state.focus_paper_id = None
-            except Exception as e: st.error(f"检索失败: {e}")
+        with st.spinner("🔍 正在检索并同步提取核心贡献..."):
+            asort = arxiv.SortCriterion.Relevance if "相关" in sort_mode else arxiv.SortCriterion.SubmittedDate
+            raw_gen = arxiv.Search(query=search_query, sort_by=asort).results()
+            st.session_state.search_generator = raw_gen
+            raw = list(itertools.islice(raw_gen, 50))
+            st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+            
+            # 补全引用
+            id2c = smart_fetch_citations(st.session_state.search_results, ss_api_key)
+            for item in st.session_state.search_results:
+                item["citations"] = id2c.get(item['obj'].entry_id, 0)
+            
+            # --- 新增：自动并行提取核心贡献 ---
+            from concurrent.futures import ThreadPoolExecutor
+            def auto_extract(item):
+                res = item['obj']
+                # 调用你现有的提取函数
+                get_one_line_contribution(res.summary, res.title, user_api_key)
 
-        if st.session_state.search_results:
-            t0 = time.time()
-            with st.spinner("获取引用数…"):
-                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                for item in st.session_state.search_results:
-                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                if "引用量" in sort_mode:
-                    st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
-                st.session_state.citations_loaded = True
-            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
-            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
-
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                executor.map(auto_extract, st.session_state.search_results)
+            
+            if "引用量" in sort_mode:
+                st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+            st.success("✅ 检索完成，已自动生成核心摘要")
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
         st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
@@ -726,16 +720,22 @@ with tab_main:
         # 修改点：加载更多功能
         if st.session_state.search_generator:
             st.markdown("---")
-            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-                with st.spinner("正在拉取更多论文..."):
-                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                    if more_raw:
-                        new_results = [{"obj":r,"citations":None} for r in more_raw]
-                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
-                        for item in new_results:
-                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                        
-                        st.session_state.search_results.extend(new_results)
+if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+            more = list(itertools.islice(st.session_state.search_generator, 50))
+            if more:
+                new_batch = [{"obj":r,"citations":None} for r in more]
+                
+                # 补全引用
+                id2c = smart_fetch_citations(new_batch, ss_api_key)
+                for nb in new_batch: nb["citations"] = id2c.get(nb['obj'].entry_id, 0)
+                
+                # --- 新增：自动提取新批次的核心贡献 ---
+                with st.spinner("正在提取新论文的核心摘要..."):
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        executor.map(lambda item: get_one_line_contribution(item['obj'].summary, item['obj'].title, user_api_key), new_batch)
+                
+                st.session_state.search_results.extend(new_batch)
+                st.rerun()
                         
                         # 如果选择了按引用量排序，新加入后统一重新排序
                         if "引用量" in sort_mode:
@@ -1029,5 +1029,6 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
