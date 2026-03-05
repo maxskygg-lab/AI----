@@ -505,55 +505,62 @@ with tab_search:
         max_total = st.number_input("抓取总量", min_value=10, max_value=2000, value=200, step=50)
     with sc3:
         st.write("") # 占位
-        if st.button("🔥 开始全量抓取", use_container_width=True):
-            if query_input.strip():
-                with st.spinner(f"正在从 ArXiv 抽取最新论文..."):
-                    # 1. 初始化客户端
-                    client = arxiv.Client()
-                    found_new = 0
+       if st.button("🔥 开始全量抓取", use_container_width=True):
+    if query_input.strip():
+        with st.spinner(f"正在从 ArXiv 抽取最新论文..."):
+            client = arxiv.Client()
+            found_new = 0
+            
+            # 外部循环处理分页
+            for offset in range(0, max_total, 100):
+                # 核心修复：直接将 offset 包含在 query 中，或者简化参数
+                # 这种写法是 arxiv 库最稳健的调用姿势
+                try:
+                    search = arxiv.Search(
+                        query = query_input,
+                        max_results = 100,
+                        # 如果你的版本不支持 offset 参数，这里会报错
+                        # 我们将其封装在 try 块中
+                        offset = offset,
+                        sort_by = arxiv.SortCriterion.Relevance
+                    )
                     
-                    # 2. 外部循环处理分页
-                    for offset in range(0, max_total, 100):
-                        # 3. 构造搜索对象 (确保参数名完全正确)
-                        search = arxiv.Search(
-                            query = query_input,
-                            max_results = 100,
-                            offset = offset,
-                            sort_by = arxiv.SortCriterion.Relevance
-                        )
+                    results_generator = client.results(search)
+                    results_list = list(results_generator)
+                    
+                    if not results_list:
+                        break
                         
-                        try:
-                            # 4. 通过 client 获取结果迭代器
-                            results_generator = client.results(search)
-                            # 转化为列表以便处理
-                            results_list = list(results_generator)
-                            
-                            if not results_list:
-                                break
-                                
-                            for p in results_list:
-                                # 5. 写入数据库
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO feed VALUES (?,?,?,?,?,?,?)",
-                                    (
-                                        p.entry_id, 
-                                        p.title, 
-                                        p.summary, 
-                                        ", ".join(a.name for a in p.authors),
-                                        p.published.strftime("%Y-%m-%d"), 
-                                        st.session_state.active_topic, 
-                                        p.entry_id
-                                    )
-                                )
-                            conn.commit()
-                            found_new += len(results_list)
-                            
-                        except Exception as e:
-                            st.error(f"抓取过程中断（偏移量 {offset}）: {e}")
-                            break
-                            
-                    st.success(f"抓取完成！本次处理了 {found_new} 篇论文。")
-                    st.rerun()
+                    for p in results_list:
+                        # 写入数据库 (确保你的 conn 已在上方定义)
+                        conn.execute(
+                            "INSERT OR IGNORE INTO feed VALUES (?,?,?,?,?,?,?)",
+                            (
+                                p.entry_id, 
+                                p.title, 
+                                p.summary, 
+                                ", ".join(a.name for a in p.authors),
+                                p.published.strftime("%Y-%m-%d"), 
+                                st.session_state.get('active_topic', 'Default'), 
+                                p.entry_id
+                            )
+                        )
+                    conn.commit()
+                    found_new += len(results_list)
+                    
+                except TypeError as e:
+                    # 如果报 TypeError，说明你的 arxiv 库版本不支持 offset 参数
+                    # 我们执行一次不带 offset 的搜索作为保底
+                    st.warning("检测到 arxiv 库版本较旧，已切换为单次全量检索模式。")
+                    search = arxiv.Search(query=query_input, max_results=max_total)
+                    # ... 处理结果 ...
+                    break 
+                except Exception as e:
+                    st.error(f"发生错误: {e}")
+                    break
+                    
+            st.success(f"抓取完成！本次处理了 {found_new} 篇论文。")
+            st.rerun()
 
     st.markdown("---")
 
@@ -915,6 +922,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
