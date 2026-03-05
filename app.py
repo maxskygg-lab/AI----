@@ -682,62 +682,45 @@ with tab_main:
                     )
 
     # ── 检索结果列表 ──
-if st.session_state.search_results:
-    # 修改点：显示“已加载”数量
-    st.markdown(
-        f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
-        f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
-        unsafe_allow_html=True
-    )
+    if st.session_state.search_results:
+        # 修改点：显示“已加载”数量
+        st.markdown(
+            f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
+            f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
+            unsafe_allow_html=True
+        )
 
-    st.download_button(
-        label="📥 点击下载当前已加载论文 (Excel)",
-        data=convert_to_excel(st.session_state.search_results),
-        file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-    st.markdown("---")
-    
-    for i, item in enumerate(st.session_state.search_results):
-        res   = item['obj']
-        cites = item['citations']
-        cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None 
-                     else "<span class='cite-loading'>加载中…</span>")
+        st.download_button(
+            label="📥 点击下载当前已加载论文 (Excel)",
+            data=convert_to_excel(st.session_state.search_results),
+            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.markdown("---")
         
-        with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-            # 完整作者
-            st.markdown(
-                f"**{', '.join([a.name for a in res.authors])}** | "
-                f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
-                unsafe_allow_html=True
-            )
-            
-            # --- 修改点：直接显示 AI 核心贡献摘要，移除手动生成按钮 ---
-            ck = res.title[:60]
-            if ck in st.session_state.contributions_cache:
-                # 已有摘要（自动生成的或缓存的）直接显示
-                st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
-            else:
-                # 若超出前50篇或生成中，给出一个友好的提示
-                st.markdown('<div class="contribution-box" style="color:#94a3b8; background:#f8fafc; border-left-color:#e2e8f0;">⏳ 核心贡献摘要生成中或超出自动处理范围...</div>', unsafe_allow_html=True)
-            
-            # 摘要正文
-            st.markdown(f'<div class="abstract-box">{res.summary}</div>', unsafe_allow_html=True)
-
-            # 操作按钮区
-            b1, b2, b3 = st.columns([1, 1, 1])
-            with b1: st.link_button("🌐 查看原文", res.entry_id, use_container_width=True)
-            with b2:
-                if st.button("🗺️ 引用关系", key=f"graph_{i}", use_container_width=True):
-                    st.session_state.focus_paper_id = res.entry_id
-                    st.rerun()
-            with b3:
-                if st.button("📥 加入研读", key=f"add_{i}", use_container_width=True):
-                    with st.spinner("下载并解析中..."):
-                        path = res.download_pdf(dirpath=tempfile.gettempdir())
-                        if process_and_add_to_topic(path, res.title, USER_API_KEY):
-                            st.toast(f"✅ 已存入主题: {st.session_state.active_topic}")
+        for i, item in enumerate(st.session_state.search_results):
+            res   = item['obj']
+            cites = item['citations']
+            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
+                         else "<span class='cite-loading'>加载中…</span>")
+            with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
+                # 完整作者
+                st.markdown(
+                    f"**{', '.join([a.name for a in res.authors])}** | "
+                    f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
+                    unsafe_allow_html=True
+                )
+                ck = res.title[:60]
+                cc,cg = st.columns([5,1])
+                with cc:
+                    if ck in st.session_state.contributions_cache:
+                        st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
+                with cg:
+                    if st.button("✨", key=f"contrib_{i}"):
+                        with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
+                        st.rerun()
                 # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
@@ -1073,8 +1056,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
-
-
-
