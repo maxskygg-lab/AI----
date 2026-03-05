@@ -681,9 +681,9 @@ with tab_main:
                         unsafe_allow_html=True,
                     )
 
-   # ── 检索结果列表 ──
+    # ── 检索结果列表 ──
     if st.session_state.search_results:
-        # 显示“已加载”数量
+        # 修改点：显示“已加载”数量
         st.markdown(
             f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
@@ -701,51 +701,42 @@ with tab_main:
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
-            # 使用 get_pure_arxiv_id 确保 Key 是唯一的（例如 2401.12345）
-            safe_id = get_pure_arxiv_id(res.entry_id)
-            
             cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
-            
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-                # 1. 完整作者与发布信息
+                # 完整作者
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
                     f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                     unsafe_allow_html=True
                 )
-                
-                # 2. 核心贡献摘要：自动显示，移除手动按钮
                 ck = res.title[:60]
-                if ck in st.session_state.contributions_cache:
-                    st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
-                else:
-                    # 占位提示
-                    st.markdown('<div class="contribution-box" style="color:#aaa;">💡 核心贡献摘要分析中（或超出自动处理范围）...</div>', unsafe_allow_html=True)
-                
-                # 3. 完整摘要，不截断
+                cc,cg = st.columns([5,1])
+                with cc:
+                    if ck in st.session_state.contributions_cache:
+                        st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
+                with cg:
+                    if st.button("✨", key=f"contrib_{i}"):
+                        with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
+                        st.rerun()
+                # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
-                
-                # 4. 操作按钮区：使用 safe_id 彻底修复 DuplicateElementKey
-                b1, b2, b3 = st.columns(3)
-                with b1: 
-                    st.markdown(f"[🔗 ArXiv 原文]({res.entry_id})")
+                b1,b2,b3 = st.columns(3)
+                with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
                 with b2:
-                    if st.button("⬇️ 下载入库", key=f"dl_btn_{safe_id}"):
+                    if st.button("⬇️ 下载入库", key=f"dl_{i}"):
                         with st.spinner("下载解析..."):
                             try:
                                 pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
-                                # 确保变量名 user_api_key 正确
-                                if process_and_add_to_topic(pdf_path, res.title, user_api_key):
-                                    st.success("入库成功！")
-                                if os.path.exists(pdf_path): os.remove(pdf_path)
+                                process_and_add_to_topic(pdf_path, res.title, user_api_key)
+                                st.success("入库成功！")
                             except Exception as e: st.error(str(e))
                 with b3:
-                    # 保留图谱预加载状态判断
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
-                    if st.button(lbl, key=f"graph_btn_{safe_id}"):
-                        st.session_state.focus_paper_id = res.entry_id
-                        st.rerun()
+                    if st.button(lbl, key=f"graph_{i}"):
+                        st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
        # 这里的缩进必须与上方的 for 循环对齐
         # 修改点：加载更多功能（自动分析前 50 篇）
@@ -1065,5 +1056,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
