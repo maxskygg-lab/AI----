@@ -660,15 +660,16 @@ with tab_main:
                         unsafe_allow_html=True,
                     )
 
-    # ── 检索结果列表 ──
+   # ── 检索结果列表 ──
     if st.session_state.search_results:
-        # 修改点：显示“已加载”数量
+        # 1. 头部统计显示
         st.markdown(
             f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
 
+        # 2. 导出 Excel 按钮 (紧跟在标题后面)
         st.download_button(
             label="📥 点击下载当前已加载论文 (Excel)",
             data=convert_to_excel(st.session_state.search_results),
@@ -677,20 +678,22 @@ with tab_main:
         )
         st.markdown("---")
         
+        # 3. 循环渲染论文卡片
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
-            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
+            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None 
                          else "<span class='cite-loading'>加载中…</span>")
+            
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-                # 完整作者
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
                     f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                     unsafe_allow_html=True
                 )
+                
                 ck = res.title[:60]
-                cc,cg = st.columns([5,1])
+                cc, cg = st.columns([5,1])
                 with cc:
                     if ck in st.session_state.contributions_cache:
                         st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
@@ -698,11 +701,13 @@ with tab_main:
                         st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
                 with cg:
                     if st.button("✨", key=f"contrib_{i}"):
-                        with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
+                        with st.spinner("分析..."): 
+                            get_one_line_contribution(res.summary, res.title, user_api_key)
                         st.rerun()
-                # 完整摘要，不截断
+
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
-                b1,b2,b3 = st.columns(3)
+                
+                b1, b2, b3 = st.columns(3)
                 with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
                 with b2:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
@@ -715,35 +720,36 @@ with tab_main:
                 with b3:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
-                        st.session_state.focus_paper_id = res.entry_id; st.rerun()
+                        st.session_state.focus_paper_id = res.entry_id
+                        st.rerun()
         
-        # 修改点：加载更多功能
+        # 4. 加载更多功能 (必须在 for 循环外面，但在 if search_results 里面)
         if st.session_state.search_generator:
             st.markdown("---")
-if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-            more = list(itertools.islice(st.session_state.search_generator, 50))
-            if more:
-                new_batch = [{"obj":r,"citations":None} for r in more]
-                
-                # 补全引用
-                id2c = smart_fetch_citations(new_batch, ss_api_key)
-                for nb in new_batch: nb["citations"] = id2c.get(nb['obj'].entry_id, 0)
-                
-                # --- 新增：自动提取新批次的核心贡献 ---
-                with st.spinner("正在提取新论文的核心摘要..."):
-                    with ThreadPoolExecutor(max_workers=5) as executor:
-                        executor.map(lambda item: get_one_line_contribution(item['obj'].summary, item['obj'].title, user_api_key), new_batch)
-                
-                st.session_state.search_results.extend(new_batch)
-                st.rerun()
-                        
-                        # 如果选择了按引用量排序，新加入后统一重新排序
-                        if "引用量" in sort_mode:
-                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                        
-                        st.rerun()
-                    else:
-                        st.info("✨ 到底啦，没有更多匹配的论文了。")
+            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+                more = list(itertools.islice(st.session_state.search_generator, 50))
+                if more:
+                    new_batch = [{"obj":r, "citations":None} for r in more]
+                    
+                    # 补全引用数
+                    id2c = smart_fetch_citations(new_batch, ss_api_key)
+                    for nb in new_batch: 
+                        nb["citations"] = id2c.get(nb['obj'].entry_id, 0)
+                    
+                    # 自动提取核心贡献 (新增的自动功能)
+                    with st.spinner("正在自动提取新批次的核心摘要..."):
+                        with ThreadPoolExecutor(max_workers=5) as executor:
+                            executor.map(lambda x: get_one_line_contribution(x['obj'].summary, x['obj'].title, user_api_key), new_batch)
+                    
+                    st.session_state.search_results.extend(new_batch)
+                    
+                    # 如果有排序需求
+                    if "引用量" in sort_mode:
+                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    
+                    st.rerun()
+                else:
+                    st.info("✨ 到底啦，没有更多匹配的论文了。")
 
 # ══════════════════════════════════════════
 # Tab 2：研读空间
@@ -1029,6 +1035,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
