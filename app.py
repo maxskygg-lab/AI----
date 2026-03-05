@@ -691,13 +691,13 @@ with tab_main:
         
         # 修改点：加载更多功能
        if st.session_state.search_generator:
-        st.markdown("---")
-        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-            # 修改点 1：更新提示语，明确包含 AI 分析过程
-            with st.spinner("正在拉取并自动分析摘要..."):
-                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                if more_raw:
-                    new_results = [{"obj":r,"citations":None} for r in more_raw]
+           st.markdown("---")
+           if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+               # 修改点 1：更新提示语，明确包含 AI 分析过程
+               with st.spinner("正在拉取并自动分析摘要..."):
+                   more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                   if more_raw:
+                       new_results = [{"obj":r,"citations":None} for r in more_raw]
                     
                     # 获取引用数
                     id2c = smart_fetch_citations(new_results, ss_key=SS_API_KEY)
@@ -1001,4 +1001,5 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
