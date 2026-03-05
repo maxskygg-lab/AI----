@@ -1,5 +1,6 @@
 import streamlit as st
 import os, time, tempfile, re, math, uuid
+import sqlite3   
 import arxiv, requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -892,6 +893,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
