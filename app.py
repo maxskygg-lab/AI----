@@ -490,7 +490,7 @@ with tab_main:
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
     with sq3:
-        max_results = st.number_input("数量",5,50,15, label_visibility="collapsed")
+        max_results = st.number_input("数量",5,200,15, label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
         with st.spinner("检索论文中..."):
@@ -929,5 +929,6 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
