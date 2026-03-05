@@ -130,63 +130,23 @@ def get_pure_arxiv_id(url_or_id):
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
 def convert_to_excel(results):
-    # 1. 自动补全缺失的核心贡献 (仅针对当前加载的结果)
-    # 我们只对那些还没生成过摘要的论文调用 AI，节省 Token
-    missing_items = [
-        item for item in results 
-        if item['obj'].title[:60] not in st.session_state.contributions_cache
-    ]
-    
-    if missing_items:
-        with st.spinner(f"正在自动提取 {len(missing_items)} 篇论文的核心贡献..."):
-            # 使用 ThreadPoolExecutor 并行处理，速度比一个一个点快得多
-            def process_item(item):
-                res = item['obj']
-                # 调用你现有的分析函数（请确保 get_one_line_contribution 函数已定义）
-                get_one_line_contribution(res.summary, res.title, USER_API_KEY)
-
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                executor.map(process_item, missing_items)
-
-    # 2. 构造数据列表
     data = []
     for item in results:
         res = item['obj']
-        ck = res.title[:60]
-        # 现在这里一定能拿到摘要了
-        contrib = st.session_state.contributions_cache.get(ck, "提取失败")
-        
+        contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
         data.append({
             "标题": res.title,
             "作者": ", ".join([a.name for a in res.authors]),
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
-            "AI核心贡献": contrib,
+            "核心贡献": contrib,
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
-    
-    # 3. 生成 Excel（带排版优化）
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='论文列表')
-        workbook  = writer.book
-        worksheet = writer.sheets['论文列表']
-        
-        wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top', 'align': 'left', 'font_size': 10})
-        
-        # 设置排版宽度
-        worksheet.set_column('A:A', 35, wrap_format) # 标题
-        worksheet.set_column('B:B', 20, wrap_format) # 作者
-        worksheet.set_column('C:D', 10, wrap_format) # 年份/引用
-        worksheet.set_column('E:E', 50, wrap_format) # 核心贡献 (加宽，方便阅读)
-        worksheet.set_column('F:F', 15, wrap_format) # 链接
-        worksheet.set_column('G:G', 50, wrap_format) # 摘要
-        
-        # 自动添加筛选器
-        worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
-
+        df.to_excel(writer, index=False, sheet_name='Search_Results')
     return output.getvalue()
 
 
@@ -556,31 +516,37 @@ with tab_main:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("🔍 正在检索并同步提取核心贡献..."):
-            asort = arxiv.SortCriterion.Relevance if "相关" in sort_mode else arxiv.SortCriterion.SubmittedDate
-            raw_gen = arxiv.Search(query=search_query, sort_by=asort).results()
-            st.session_state.search_generator = raw_gen
-            raw = list(itertools.islice(raw_gen, 50))
-            st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-            
-            # 补全引用
-            id2c = smart_fetch_citations(st.session_state.search_results, ss_api_key)
-            for item in st.session_state.search_results:
-                item["citations"] = id2c.get(item['obj'].entry_id, 0)
-            
-            # --- 新增：自动并行提取核心贡献 ---
-            from concurrent.futures import ThreadPoolExecutor
-            def auto_extract(item):
-                res = item['obj']
-                # 调用你现有的提取函数
-                get_one_line_contribution(res.summary, res.title, user_api_key)
+        with st.spinner("检索论文中..."):
+            try:
+                asort = arxiv.SortCriterion.Relevance
+                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                refined = search_query
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
+                
+                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
+                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                st.session_state.search_generator = raw_gen
+                raw = list(itertools.islice(raw_gen, 50))
+                
+                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                st.session_state.citations_loaded = False
+                st.session_state.contributions_cache = {}
+                st.session_state.focus_paper_id = None
+            except Exception as e: st.error(f"检索失败: {e}")
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                executor.map(auto_extract, st.session_state.search_results)
-            
-            if "引用量" in sort_mode:
-                st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-            st.success("✅ 检索完成，已自动生成核心摘要")
+        if st.session_state.search_results:
+            t0 = time.time()
+            with st.spinner("获取引用数…"):
+                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
+                for item in st.session_state.search_results:
+                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                if "引用量" in sort_mode:
+                    st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
+                st.session_state.citations_loaded = True
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
+            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
         st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
@@ -660,16 +626,15 @@ with tab_main:
                         unsafe_allow_html=True,
                     )
 
-   # ── 检索结果列表 ──
+    # ── 检索结果列表 ──
     if st.session_state.search_results:
-        # 1. 头部统计显示
+        # 修改点：显示“已加载”数量
         st.markdown(
             f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
 
-        # 2. 导出 Excel 按钮 (紧跟在标题后面)
         st.download_button(
             label="📥 点击下载当前已加载论文 (Excel)",
             data=convert_to_excel(st.session_state.search_results),
@@ -678,22 +643,20 @@ with tab_main:
         )
         st.markdown("---")
         
-        # 3. 循环渲染论文卡片
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
-            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None 
+            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
-            
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
+                # 完整作者
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
                     f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                     unsafe_allow_html=True
                 )
-                
                 ck = res.title[:60]
-                cc, cg = st.columns([5,1])
+                cc,cg = st.columns([5,1])
                 with cc:
                     if ck in st.session_state.contributions_cache:
                         st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
@@ -701,13 +664,11 @@ with tab_main:
                         st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
                 with cg:
                     if st.button("✨", key=f"contrib_{i}"):
-                        with st.spinner("分析..."): 
-                            get_one_line_contribution(res.summary, res.title, user_api_key)
+                        with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
                         st.rerun()
-
+                # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
-                
-                b1, b2, b3 = st.columns(3)
+                b1,b2,b3 = st.columns(3)
                 with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
                 with b2:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
@@ -720,36 +681,29 @@ with tab_main:
                 with b3:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
-                        st.session_state.focus_paper_id = res.entry_id
-                        st.rerun()
+                        st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
-        # 4. 加载更多功能 (必须在 for 循环外面，但在 if search_results 里面)
+        # 修改点：加载更多功能
         if st.session_state.search_generator:
             st.markdown("---")
             if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-                more = list(itertools.islice(st.session_state.search_generator, 50))
-                if more:
-                    new_batch = [{"obj":r, "citations":None} for r in more]
-                    
-                    # 补全引用数
-                    id2c = smart_fetch_citations(new_batch, ss_api_key)
-                    for nb in new_batch: 
-                        nb["citations"] = id2c.get(nb['obj'].entry_id, 0)
-                    
-                    # 自动提取核心贡献 (新增的自动功能)
-                    with st.spinner("正在自动提取新批次的核心摘要..."):
-                        with ThreadPoolExecutor(max_workers=5) as executor:
-                            executor.map(lambda x: get_one_line_contribution(x['obj'].summary, x['obj'].title, user_api_key), new_batch)
-                    
-                    st.session_state.search_results.extend(new_batch)
-                    
-                    # 如果有排序需求
-                    if "引用量" in sort_mode:
-                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    
-                    st.rerun()
-                else:
-                    st.info("✨ 到底啦，没有更多匹配的论文了。")
+                with st.spinner("正在拉取更多论文..."):
+                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                    if more_raw:
+                        new_results = [{"obj":r,"citations":None} for r in more_raw]
+                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
+                        for item in new_results:
+                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                        
+                        st.session_state.search_results.extend(new_results)
+                        
+                        # 如果选择了按引用量排序，新加入后统一重新排序
+                        if "引用量" in sort_mode:
+                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                        
+                        st.rerun()
+                    else:
+                        st.info("✨ 到底啦，没有更多匹配的论文了。")
 
 # ══════════════════════════════════════════
 # Tab 2：研读空间
@@ -1035,7 +989,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
-
-
