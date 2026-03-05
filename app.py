@@ -505,8 +505,8 @@ with tab_search:
         max_total = st.number_input("抓取总量", min_value=10, max_value=2000, value=200, step=50)
     with sc3:
         st.write("") # 占位
-       if st.button("🔥 开始全量抓取", use_container_width=True):
-       if query_input.strip():
+        if st.button("🔥 开始全量抓取", use_container_width=True):
+        if query_input.strip():
         with st.spinner(f"正在从 ArXiv 抽取最新论文..."):
             client = arxiv.Client()
             found_new = 0
@@ -922,6 +922,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
