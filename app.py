@@ -1,5 +1,5 @@
 import streamlit as st
-import os, time, tempfile, re, math, uuid
+import os, time, tempfile, re, math, uuid, itertools
 import arxiv, requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,6 +98,7 @@ SS_API_KEY   = st.secrets["SS_API_KEY"]
 # ================= 3. 状态初始化 =================
 defaults = {
     "search_results":         [],
+    "search_generator":       None,  # 新增：用于保存无上限搜索的生成器
     "citations_loaded":       False,
     "citations_global_cache": {},
     "suggested_query":        "",
@@ -308,9 +309,9 @@ def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
             if r.published.replace(tzinfo=None) > cutoff:
                 out.append({
                     "title":     r.title,
-                    "authors":   ", ".join([a.name for a in r.authors]),  # 完整作者
+                    "authors":   ", ".join([a.name for a in r.authors]),
                     "published": r.published.strftime("%Y-%m-%d"),
-                    "summary":   r.summary,                               # 完整摘要
+                    "summary":   r.summary,
                     "entry_id":  r.entry_id,
                     "obj":       r,
                 })
@@ -483,14 +484,14 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
-    sq1,sq2,sq3 = st.columns([3,1.5,1])
+    
+    # 修改点：移除了原本控制数量的组件，改为只占两列
+    sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
-    with sq3:
-        max_results = st.number_input("数量",5,200,15, label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
         with st.spinner("检索论文中..."):
@@ -500,7 +501,12 @@ with tab_main:
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-                raw = list(arxiv.Search(query=refined, max_results=max_results, sort_by=asort).results())
+                
+                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
+                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                st.session_state.search_generator = raw_gen
+                raw = list(itertools.islice(raw_gen, 50))
+                
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
@@ -516,7 +522,7 @@ with tab_main:
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
                 st.session_state.citations_loaded = True
-            st.success(f"✅ {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
             preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
@@ -600,8 +606,9 @@ with tab_main:
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
+        # 修改点：显示“已加载”数量
         st.markdown(
-            f'<div class="section-divider">📋 检索结果（{len(st.session_state.search_results)} 篇）'
+            f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
@@ -644,6 +651,28 @@ with tab_main:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
+        
+        # 修改点：加载更多功能
+        if st.session_state.search_generator:
+            st.markdown("---")
+            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+                with st.spinner("正在拉取更多论文..."):
+                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                    if more_raw:
+                        new_results = [{"obj":r,"citations":None} for r in more_raw]
+                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
+                        for item in new_results:
+                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                        
+                        st.session_state.search_results.extend(new_results)
+                        
+                        # 如果选择了按引用量排序，新加入后统一重新排序
+                        if "引用量" in sort_mode:
+                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                        
+                        st.rerun()
+                    else:
+                        st.info("✨ 到底啦，没有更多匹配的论文了。")
 
 # ══════════════════════════════════════════
 # Tab 2：研读空间
@@ -899,14 +928,14 @@ with tab_notes:
         all_tags   = sorted(set(tag for n in st.session_state.notes for tag in n["tags"]))
         all_topics = sorted(set(n["topic"] for n in st.session_state.notes))
         f1,f2,f3 = st.columns([2,2,2])
-        with f1: filter_tag   = st.selectbox("按标签",["全部"]+all_tags)
-        with f2: filter_topic = st.selectbox("按主题",["全部"]+all_topics)
-        with f3: search_note  = st.text_input("关键词", placeholder="搜索笔记")
+        with f1: filter_tag    = st.selectbox("按标签",["全部"]+all_tags)
+        with f2: filter_topic  = st.selectbox("按主题",["全部"]+all_topics)
+        with f3: search_note   = st.text_input("关键词", placeholder="搜索笔记")
 
         filtered = st.session_state.notes.copy()
-        if filter_tag   != "全部": filtered = [n for n in filtered if filter_tag in n["tags"]]
-        if filter_topic != "全部": filtered = [n for n in filtered if n["topic"] == filter_topic]
-        if search_note:            filtered = [n for n in filtered if search_note.lower() in (n["content"]+n.get("question","")).lower()]
+        if filter_tag    != "全部": filtered = [n for n in filtered if filter_tag in n["tags"]]
+        if filter_topic  != "全部": filtered = [n for n in filtered if n["topic"] == filter_topic]
+        if search_note:             filtered = [n for n in filtered if search_note.lower() in (n["content"]+n.get("question","")).lower()]
 
         st.caption(f"共 {len(filtered)} 条")
         for note in reversed(filtered):
@@ -929,5 +958,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
