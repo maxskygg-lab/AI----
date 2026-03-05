@@ -507,30 +507,52 @@ with tab_search:
         st.write("") # 占位
         if st.button("🔥 开始全量抓取", use_container_width=True):
             if query_input.strip():
-                with st.spinner(f"正在从 ArXiv 抽取 {max_total} 篇论文..."):
+                with st.spinner(f"正在从 ArXiv 抽取最新论文..."):
+                    # 1. 初始化客户端
                     client = arxiv.Client()
                     found_new = 0
-                    # 循环翻页抓取逻辑 (每次100篇)
+                    
+                    # 2. 外部循环处理分页
                     for offset in range(0, max_total, 100):
+                        # 3. 构造搜索对象 (确保参数名完全正确)
                         search = arxiv.Search(
-                            query=query_input,
-                            max_results=100,
-                            offset=offset,
-                            sort_by=arxiv.SortCriterion.Relevance
+                            query = query_input,
+                            max_results = 100,
+                            offset = offset,
+                            sort_by = arxiv.SortCriterion.Relevance
                         )
+                        
                         try:
-                            results = list(client.results(search))
-                            if not results: break
-                            for p in results:
-                                conn.execute("INSERT OR IGNORE INTO feed VALUES (?,?,?,?,?,?,?)",
-                                          (p.entry_id, p.title, p.summary, 
-                                           ", ".join(a.name for a in p.authors),
-                                           p.published.strftime("%Y-%m-%d"), 
-                                           st.session_state.active_topic, p.entry_id))
-                                if conn.total_changes > 0: found_new += 1
+                            # 4. 通过 client 获取结果迭代器
+                            results_generator = client.results(search)
+                            # 转化为列表以便处理
+                            results_list = list(results_generator)
+                            
+                            if not results_list:
+                                break
+                                
+                            for p in results_list:
+                                # 5. 写入数据库
+                                conn.execute(
+                                    "INSERT OR IGNORE INTO feed VALUES (?,?,?,?,?,?,?)",
+                                    (
+                                        p.entry_id, 
+                                        p.title, 
+                                        p.summary, 
+                                        ", ".join(a.name for a in p.authors),
+                                        p.published.strftime("%Y-%m-%d"), 
+                                        st.session_state.active_topic, 
+                                        p.entry_id
+                                    )
+                                )
                             conn.commit()
-                        except Exception: break
-                    st.success(f"抓取完成！新入库 {found_new} 篇动态。")
+                            found_new += len(results_list)
+                            
+                        except Exception as e:
+                            st.error(f"抓取过程中断（偏移量 {offset}）: {e}")
+                            break
+                            
+                    st.success(f"抓取完成！本次处理了 {found_new} 篇论文。")
                     st.rerun()
 
     st.markdown("---")
@@ -893,6 +915,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
