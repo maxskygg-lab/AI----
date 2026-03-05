@@ -689,34 +689,32 @@ with tab_main:
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
-        # 修改点：加载更多功能
-       if st.session_state.search_generator:
-           st.markdown("---")
-           if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-               # 修改点 1：更新提示语，明确包含 AI 分析过程
-               with st.spinner("正在拉取并自动分析摘要..."):
-                   more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                   if more_raw:
-                       new_results = [{"obj":r,"citations":None} for r in more_raw]
-                    
-                    # 获取引用数
-                    id2c = smart_fetch_citations(new_results, ss_key=SS_API_KEY)
-                    for item in new_results:
-                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                    
-                    # 修改点 2：在加入全局列表前或后，立即执行批量摘要生成
-                    # 传入新拉取的 new_results 即可
-                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
-                    
-                    st.session_state.search_results.extend(new_results)
-                    
-                    if "引用量" in sort_mode:
-                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    
-                    # 修改点 3：确保 rerun 在所有逻辑（包括摘要生成）完成后执行
-                    st.rerun()
-                else:
-                    st.info("✨ 到底啦，没有更多匹配的论文了。")
+       # 这里的缩进必须与上方的 for 循环对齐
+        if st.session_state.search_generator:
+            st.markdown("---")
+            if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+                with st.spinner("正在拉取并自动分析摘要..."):
+                    more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                    if more_raw:
+                        new_results = [{"obj": r, "citations": None} for r in more_raw]
+                        
+                        # 获取引用数 (注意使用小写的 ss_api_key)
+                        id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
+                        for item in new_results:
+                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                        
+                        # 自动生成摘要
+                        auto_batch_contributions(new_results, USER_API_KEY, limit=50)
+                        
+                        st.session_state.search_results.extend(new_results)
+                        
+                        # 确保 sort_mode 变量在上下文中已定义
+                        if "引用量" in sort_mode:
+                            st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                        
+                        st.rerun()
+                    else:
+                        st.info("✨ 到底啦，没有更多匹配的论文了。")
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
@@ -1001,5 +999,6 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
