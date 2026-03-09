@@ -12,14 +12,10 @@ requests
 streamlit_agraph
 xlsxwriter
 pandas
-
-# Google Gemini 核心依赖 (新增)
-langchain-google-genai
-google-generativeai
-
-# 增强工具
 langchain
 
+langchain-google-genai>=2.0.0
+google-generativeai>=0.8.0
 
 
 
