@@ -327,9 +327,11 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
 
-        # --- 修改 1: 替换为 Gemini Embedding ---
-        # 建议使用 models/text-embedding-004，它是目前 Google 效果最好的向量模型
-        embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=api_key)
+        
+        embeddings = GoogleGenerativeAIEmbeddings(
+        model="embedding-001",  # 换成 001，这个版本在全球节点的 v1 接口中都已上线
+        google_api_key=api_key
+        )
 
         # Gemini API 的限制较少，可以将 batch 调大到 50-100 提高速度
         batch = 50 
@@ -361,9 +363,10 @@ def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
     
-    # --- 修改 2: 替换为 Gemini Embedding ---
-    embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=api_key)
-    t["db"] = FAISS.from_documents(t["chunks"], embeddings)
+    embeddings = GoogleGenerativeAIEmbeddings(
+    model="embedding-001",  # 换成 001，这个版本在全球节点的 v1 接口中都已上线
+    google_api_key=api_key
+    )
 
 def detect_knowledge_gap(answer_text, docs):
     # 此逻辑属于业务逻辑，不涉及 API 替换，保持原样即可
@@ -1077,6 +1080,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
