@@ -921,7 +921,7 @@ with tab_read:
                             f"### 用户问题：\n{prompt}"
                         )
                         
-                    llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", google_api_key=user_api_key, temperature=0.1)
+                        llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", google_api_key=user_api_key, temperature=0.1)
                     	answer = fix_latex(llm.invoke(sys_p).content)
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
@@ -1081,5 +1081,6 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
