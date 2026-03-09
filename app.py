@@ -329,7 +329,7 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
 
         
         embeddings = GoogleGenerativeAIEmbeddings(
-        model="text-embedding-004", 
+        model="models/text-embedding-004", 
         google_api_key=api_key,
         task_type="retrieval_document"
         )
@@ -365,7 +365,7 @@ def rebuild_topic_index(topic_name, api_key):
     if not t["chunks"]: t["db"] = None; return
     
     embeddings = GoogleGenerativeAIEmbeddings(
-    model="text-embedding-004", 
+    model="models/text-embedding-004", 
     google_api_key=api_key,
     task_type="retrieval_document"
     )
@@ -1082,6 +1082,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
