@@ -329,8 +329,9 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
 
         
         embeddings = GoogleGenerativeAIEmbeddings(
-        model="embedding-001",  # 换成 001，这个版本在全球节点的 v1 接口中都已上线
-        google_api_key=api_key
+        model="text-embedding-004", 
+        google_api_key=api_key,
+        task_type="retrieval_document"
         )
 
         # Gemini API 的限制较少，可以将 batch 调大到 50-100 提高速度
@@ -364,8 +365,9 @@ def rebuild_topic_index(topic_name, api_key):
     if not t["chunks"]: t["db"] = None; return
     
     embeddings = GoogleGenerativeAIEmbeddings(
-    model="embedding-001",  # 换成 001，这个版本在全球节点的 v1 接口中都已上线
-    google_api_key=api_key
+    model="text-embedding-004", 
+    google_api_key=api_key,
+    task_type="retrieval_document"
     )
 
 def detect_knowledge_gap(answer_text, docs):
@@ -1080,6 +1082,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
