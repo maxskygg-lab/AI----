@@ -336,41 +336,48 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
 
        # === 修改后的稳健入库逻辑 ===
         # 1. 调小 batch 以减少单个请求的体积，同时增加 sleep 间隔
-        safe_batch = 30  
+        # === 核心修复：限流版批量入库逻辑 ===
+        safe_batch = 30  # 每批处理 30 个分块
         
+        # 1. 初始化或定位起始位置
         if t["db"] is None:
-            # 初始化第一批
+            # 初始第一批，用于创建数据库
             initial_batch = chunks[:safe_batch]
             t["db"] = FAISS.from_documents(initial_batch, embeddings)
-            start_idx = safe_batch
+            remaining_chunks = chunks[safe_batch:]
         else:
-            start_idx = 0
+            # 已有数据库，处理全部新分块
+            remaining_chunks = chunks
 
         # 2. 循环添加，并强制加入“冷却时间”
-        remaining_chunks = chunks[start_idx:]
-        
         if remaining_chunks:
-            # 使用进度条让用户知道进度，避免以为程序卡死
-            progress_bar = st.progress(0, text="正在同步向量数据到索引...")
-            total_steps = math.ceil(len(remaining_chunks) / safe_batch)
+            # 使用 Streamlit 进度条显示进度
+            progress_bar = st.progress(0, text="📡 正在同步向量数据到索引...")
+            total_chunks = len(remaining_chunks)
+            total_steps = math.ceil(total_chunks / safe_batch)
             
-            for i in range(0, len(remaining_chunks), safe_batch):
+            for i in range(0, total_chunks, safe_batch):
                 batch_to_add = remaining_chunks[i : i + safe_batch]
+                
+                # 执行入库
                 t["db"].add_documents(batch_to_add)
                 
-                # 更新进度
-                step = i // safe_batch + 1
-                progress_bar.progress(step / total_steps, text=f"已入库 {min((i+safe_batch), len(remaining_chunks))}/{len(remaining_chunks)} 块...")
+                # 更新进度条
+                current_step = (i // safe_batch) + 1
+                progress_text = f"⏳ 已入库 {min((i + safe_batch), total_chunks)}/{total_chunks} 块 (配额冷却中...)"
+                progress_bar.progress(current_step / total_steps, text=progress_text)
                 
-                # 关键：强制休眠。免费版建议 3-5 秒，确保每分钟请求数远低于 100
+                # 3. 关键：强制休眠。
+                # 免费版限制为 100 RPM（每分钟请求数）。
+                # 处理大文件时，每秒一个请求都可能触发限制，这里休眠 3 秒是最稳妥的。
                 time.sleep(3) 
             
             progress_bar.empty()
 
-        # 3. 后续逻辑保持不变
+        # 4. 后续逻辑：更新文件列表和通知
         if file_name not in t["files"]:
             t["files"].append(file_name)
-        
+            
         st.session_state.chat_history.append({
             "role": "system_notice",
             "content": f"📚 《{file_name}》已加入主题「{topic_name}」。"
@@ -378,7 +385,7 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         return True
 
     except Exception as e:
-        # 如果是因为额度报错，给用户更友好的提示
+        # 专门针对 429 频率限制报错进行友好提示
         if "429" in str(e):
             st.error("🚀 速度太快啦！API 额度暂时耗尽，请等待 1 分钟后重试。")
         else:
@@ -1107,6 +1114,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
