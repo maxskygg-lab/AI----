@@ -334,21 +334,40 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         task_type="retrieval_document"
         )
 
-        # Gemini API 的限制较少，可以将 batch 调大到 50-100 提高速度
-        batch = 50 
+       # === 修改后的稳健入库逻辑 ===
+        # 1. 调小 batch 以减少单个请求的体积，同时增加 sleep 间隔
+        safe_batch = 30  
+        
         if t["db"] is None:
-            # 初始化数据库
-            initial_batch = chunks[:batch]
+            # 初始化第一批
+            initial_batch = chunks[:safe_batch]
             t["db"] = FAISS.from_documents(initial_batch, embeddings)
-            # 循环添加剩余部分
-            for i in range(batch, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch])
-                # Gemini 的速率限制比智谱宽，如果不是极大规模文档，这里可以不强制 sleep
+            start_idx = safe_batch
         else:
-            # 已有数据库，直接增量添加
-            for i in range(0, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch])
+            start_idx = 0
 
+        # 2. 循环添加，并强制加入“冷却时间”
+        remaining_chunks = chunks[start_idx:]
+        
+        if remaining_chunks:
+            # 使用进度条让用户知道进度，避免以为程序卡死
+            progress_bar = st.progress(0, text="正在同步向量数据到索引...")
+            total_steps = math.ceil(len(remaining_chunks) / safe_batch)
+            
+            for i in range(0, len(remaining_chunks), safe_batch):
+                batch_to_add = remaining_chunks[i : i + safe_batch]
+                t["db"].add_documents(batch_to_add)
+                
+                # 更新进度
+                step = i // safe_batch + 1
+                progress_bar.progress(step / total_steps, text=f"已入库 {min((i+safe_batch), len(remaining_chunks))}/{len(remaining_chunks)} 块...")
+                
+                # 关键：强制休眠。免费版建议 3-5 秒，确保每分钟请求数远低于 100
+                time.sleep(3) 
+            
+            progress_bar.empty()
+
+        # 3. 后续逻辑保持不变
         if file_name not in t["files"]:
             t["files"].append(file_name)
         
@@ -357,8 +376,14 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
             "content": f"📚 《{file_name}》已加入主题「{topic_name}」。"
         })
         return True
+
     except Exception as e:
-        st.error(f"处理失败: {e}"); return False
+        # 如果是因为额度报错，给用户更友好的提示
+        if "429" in str(e):
+            st.error("🚀 速度太快啦！API 额度暂时耗尽，请等待 1 分钟后重试。")
+        else:
+            st.error(f"处理失败: {e}")
+        return False
 
 def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
@@ -1082,6 +1107,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
