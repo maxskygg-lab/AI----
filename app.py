@@ -616,7 +616,9 @@ with tab_main:
         st.rerun()
 
     # ── 图谱区 ──
+    # ── 详情页/检索结果区域 ──
     if st.session_state.focus_paper_id:
+        # 1. 图谱聚焦详情展示
         st.markdown(f"""
             <div style="background:#f8fafc;border:1px solid #e2e8f0;
                         border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
@@ -641,145 +643,140 @@ with tab_main:
             </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("")
-    target_topic = st.selectbox(                        
-        "加入主题", list(st.session_state.topics.keys()),
-        index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
-        key="graph_topic_sel", label_visibility="collapsed"                    
-    )
-    
-    arxiv_id = info.get('arxiv_id')
-    ga, gb, gc = st.columns(3)                    
-    
-   with ga:                        
-        if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
-            with st.spinner("正在直接下载 PDF..."):                            
-                try:
-                    # 效率优化：不再通过 arxiv.Search 检索元数据，直接拼接官方 PDF 链接
-                    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-                    resp = requests.get(pdf_url, timeout=15)                                        
-                    if resp.status_code == 200:                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                            tmp.write(resp.content)
-                            pdf_path = tmp.name                                                
-                        # 调用已改好的本地免费 Embedding 函数入库                        
-                        if process_and_add_to_topic(pdf_path, info['title'], DEEPSEEK_API_KEY, topic_name=target_topic):
-                            st.success("✅ 已入库")                    
-                    else:
-                        st.error(f"下载失败 (HTTP {resp.status_code})")                
-                except Exception as e: 
-                    st.error(f"处理失败: {str(e)}")                                
-        elif not arxiv_id: 
-            st.caption("暂无全文")                        
-
-    with gb:
-        st.link_button("🌐 SS", info['url'], use_container_width=True)                    
-    
-    with gc:                                
-        # 效率优化：仅在 ID 变化时触发重绘，减少不必要的 rerun 频率        
-        if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
-            if st.session_state.focus_paper_id != info['arxiv_id']:
-                st.session_state.focus_paper_id = info['arxiv_id']
-                st.rerun()
-
-# 注意：此处的 else 必须与最外层的 if st.session_state.focus_paper_id: 保持垂直对齐
-else:
-    st.markdown(                                
-        """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
-                      padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
-                      min-height:260px;display:flex;align-items:center;justify-content:center;">
-              ← 点击左侧节点<br>查看完整详情</div>""",
-        unsafe_allow_html=True,    
-    )
-    
-    # ── 检索结果列表 ──
-    if st.session_state.search_results:
-        # 修改点：显示“已加载”数量
-        st.markdown(
-            f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
-            f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
-            unsafe_allow_html=True
+        st.markdown("")
+        target_topic = st.selectbox(                        
+            "加入主题", list(st.session_state.topics.keys()),
+            index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
+            key="graph_topic_sel", label_visibility="collapsed"                    
         )
+        
+        arxiv_id = info.get('arxiv_id')
+        ga, gb, gc = st.columns(3)                    
+        
+        with ga:                        
+            if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
+                with st.spinner("正在直接下载 PDF..."):                            
+                    try:
+                        # 效率优化：直接拼接链接下载
+                        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                        resp = requests.get(pdf_url, timeout=15)                                        
+                        if resp.status_code == 200:                        
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                tmp.write(resp.content)
+                                pdf_path = tmp.name                                                
+                            if process_and_add_to_topic(pdf_path, info['title'], DEEPSEEK_API_KEY, topic_name=target_topic):
+                                st.success("✅ 已入库")                    
+                        else:
+                            st.error(f"下载失败 (HTTP {resp.status_code})")                
+                    except Exception as e: 
+                        st.error(f"处理失败: {str(e)}")                                
+            elif not arxiv_id: 
+                st.caption("暂无全文")                        
 
-        st.download_button(
-            label="📥 点击下载当前已加载论文 (Excel)",
-            data=convert_to_excel(st.session_state.search_results),
-            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        with gb:
+            st.link_button("🌐 SS", info['url'], use_container_width=True)                    
+        
+        with gc:                                
+            if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
+                if st.session_state.focus_paper_id != info['arxiv_id']:
+                    st.session_state.focus_paper_id = info['arxiv_id']
+                    st.rerun()
+
+    else:
+        # 2. 未聚焦时的占位提示
+        st.markdown(                        
+            """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
+                          padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
+                          min-height:260px;display:flex;align-items:center;justify-content:center;">
+                  ← 点击左侧节点<br>查看完整详情</div>""",
+            unsafe_allow_html=True,    
         )
-        st.markdown("---")
         
-        for i, item in enumerate(st.session_state.search_results):
-            res   = item['obj']
-            cites = item['citations']
-            cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
-                         else "<span class='cite-loading'>加载中…</span>")
-            with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-                # 完整作者
-                st.markdown(
-                    f"**{', '.join([a.name for a in res.authors])}** | "
-                    f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
-                    unsafe_allow_html=True
-                )
-                ck = res.title[:60]
-                cc,cg = st.columns([5,1])
-                with cc:
-                    if ck in st.session_state.contributions_cache:
-                        st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
-                with cg:
-                    if st.button("✨", key=f"contrib_{i}"):
-                        with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
-                        st.rerun()
-                # 完整摘要，不截断
-                st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
-                b1,b2,b3 = st.columns(3)
-                with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
-                with b2:
-                    if st.button("⬇️ 下载入库", key=f"dl_{i}"):
-                        with st.spinner("下载解析..."):
-                            try:
-                                pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
-                                process_and_add_to_topic(pdf_path, res.title, user_api_key)
-                                st.success("入库成功！")
-                            except Exception as e: st.error(str(e))
-                with b3:
-                    lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
-                    if st.button(lbl, key=f"graph_{i}"):
-                        st.session_state.focus_paper_id = res.entry_id; st.rerun()
-        
-       # 这里的缩进必须与上方的 for 循环对齐
-        # 修改点：加载更多功能（自动分析前 50 篇）
+        # 3. 检索结果列表展示
+        if st.session_state.search_results:
+            st.markdown(
+                f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
+                f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
+                unsafe_allow_html=True
+            )
+
+            st.download_button(
+                label="📥 点击下载当前已加载论文 (Excel)",
+                data=convert_to_excel(st.session_state.search_results),
+                file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            st.markdown("---")
+            
+            for i, item in enumerate(st.session_state.search_results):
+                res   = item['obj']
+                cites = item['citations']
+                cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None 
+                             else "<span class='cite-loading'>加载中…</span>")
+                
+                with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
+                    st.markdown(
+                        f"**{', '.join([a.name for a in res.authors])}** | "
+                        f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
+                        unsafe_allow_html=True
+                    )
+                    
+                    ck = res.title[:60]
+                    cc, cg = st.columns([5, 1])
+                    with cc:
+                        if ck in st.session_state.contributions_cache:
+                            st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
+                    
+                    with cg:
+                        if st.button("✨", key=f"contrib_{i}"):
+                            with st.spinner("分析..."): 
+                                get_one_line_contribution(res.summary, res.title, user_api_key)
+                            st.rerun()
+                    
+                    st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
+                    
+                    b1, b2, b3 = st.columns(3)
+                    with b1: 
+                        st.markdown(f"[🔗 ArXiv]({res.entry_id})")
+                    with b2:
+                        if st.button("⬇️ 下载入库", key=f"dl_{i}"):
+                            with st.spinner("下载解析..."):
+                                try:
+                                    pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
+                                    process_and_add_to_topic(pdf_path, res.title, user_api_key)
+                                    st.success("入库成功！")
+                                except Exception as e: 
+                                    st.error(str(e))
+                    with b3:
+                        lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
+                        if st.button(lbl, key=f"graph_{i}"):
+                            st.session_state.focus_paper_id = res.entry_id
+                            st.rerun()
+
+    # 4. 加载更多功能（跳出循环，与 for 对齐）
     if st.session_state.search_generator:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-            # 统一提示语
             with st.spinner("正在拉取并自动分析新论文摘要..."):
-                # 从 generator 中切取下 50 篇
                 more_raw = list(itertools.islice(st.session_state.search_generator, 50))
                 
                 if more_raw:
-                    # 1. 封装新结果
                     new_results = [{"obj": r, "citations": None} for r in more_raw]
-                    
-                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
+                    # 获取引用
                     id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
                     for item in new_results:
                         item["citations"] = id2c.get(item['obj'].entry_id, 0)
                     
-                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
-                    # 确保 auto_batch_contributions 已在工具函数区定义
+                    # 核心新增：批量 AI 分析新加载的内容
                     auto_batch_contributions(new_results, USER_API_KEY, limit=50)
                     
-                    # 4. 合并到全局搜索结果中
                     st.session_state.search_results.extend(new_results)
                     
-                    # 5. 如果当前是引用量排序模式，则重新全局排序
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
                     
-                    # 6. 刷新页面显示结果
                     st.rerun()
                 else:
                     st.info("✨ 到底啦，没有更多匹配的论文了。")
@@ -1072,6 +1069,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
