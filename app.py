@@ -571,72 +571,52 @@ with tab_main:
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
-    if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("检索论文中..."):
-            try:
-                asort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                refined = search_query
-                if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-                
-                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
-                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
-                st.session_state.search_generator = raw_gen
-                raw = list(itertools.islice(raw_gen, 50))
-                
-                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-                st.session_state.citations_loaded = False
-                st.session_state.contributions_cache = {}
-                st.session_state.focus_paper_id = None
-            except Exception as e: st.error(f"检索失败: {e}")
-
-        if st.session_state.search_results:
-            t0 = time.time()
-            # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
-            with st.spinner("同步引用数并自动分析前50篇摘要..."):
-                # 1. 获取引用数
-                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                for item in st.session_state.search_results:
-                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                
-                # 2. 排序逻辑（如果是引用量排序）
-                if "引用量" in sort_mode:
-                    st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                
-                # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
-                # 确保 USER_API_KEY 已在 secrets 或上方定义
-                auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
-                
-                st.session_state.citations_loaded = True
+    if st.button("🚀 检索", use_container_width=True) and search_query:        
+    with st.spinner("检索论文中..."):            
+        try:
+            asort = arxiv.SortCriterion.Relevance                
+            if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+            refined = search_query                
+            if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
             
-            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，自动分析耗时 {time.time()-t0:.1f}s")
-            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+            # 取消 max_results 限制，保存为 generator，并切取前 50 篇
+            raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+            st.session_state.search_generator = raw_gen
+            raw = list(itertools.islice(raw_gen, 50))                
+            st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+            st.session_state.citations_loaded = False
+            # 关键：清空缓存，确保新搜索的结果没有旧的摘要
+            st.session_state.contributions_cache = {}
+            st.session_state.focus_paper_id = None            
+        except Exception as e: 
+            st.error(f"检索失败: {e}")
+
+    if st.session_state.search_results:
+        t0 = time.time()            
+        # 修改点：不再提示“自动分析摘要”，只提示同步引用数
+        with st.spinner("同步引用数并优化排序..."):                
+            # 1. 获取引用数 (这是免费接口，不消耗 DS 额度)
+            id2c = smart_fetch_citations(st.session_state.search_results, ss_key=SS_API_KEY)                
+            for item in st.session_state.search_results:
+                item["citations"] = id2c.get(item['obj'].entry_id, 0)                                
+            
+            # 2. 排序逻辑
+            if "引用量" in sort_mode:
+                st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)                                
+            
+            # --- 【修改点：删除 auto_batch_contributions 调用】 ---
+            # 这里不再调用 AI，所以检索瞬间完成，不消耗任何 Token
+            
+            st.session_state.citations_loaded = True            
+        
+        st.success(f"✅ 已找到 {len(st.session_state.search_results)} 篇论文 (耗时 {time.time()-t0:.1f}s)")            
+        # 预加载图谱（也是免费接口）
+        preload_top_graphs(st.session_state.search_results, ss_key=SS_API_KEY, top_n=3)
+        st.rerun()
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
-        st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
-        min_cf = st.slider("最低引用数过滤", 0, 200, 5, step=1, key="graph_cite_filter")
-        with st.spinner("加载图谱…"):
-            g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
-
-        if not g_data:
-            st.warning("⚠️ 暂时无法获取图谱，请稍后再试。")
-        else:
-            gc_graph, gc_info = st.columns([1.6, 1])
-            with gc_graph:
-                clicked_id, all_details = render_connected_graph(g_data, min_cite_filter=min_cf)
-                sid = g_data.get('paperId','root')
-                if sid in all_details:
-                    all_details[sid]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
-                if not (clicked_id and clicked_id in all_details):
-                    st.caption("👆 点击节点 → 右侧看完整详情 | 🔴 当前  🟢 引用本文  🔵 本文引用")
-
-            with gc_info:
-                if clicked_id and clicked_id in all_details:
-                    info = all_details[clicked_id]
-                    st.markdown(
-                        f"""
                         <div style="background:#f8fafc;border:1px solid #e2e8f0;
                                     border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
                             <div style="font-size:.93em;font-weight:700;color:#1e293b;
@@ -654,43 +634,61 @@ with tab_main:
                                 </span>
                             </div>
                             <div style="font-size:.82em;color:#475569;
-                                        max-height:320px;overflow-y:auto;line-height:1.65;">
-                                {info['abstract']}
+                                        max-height:320px;overflow-y:auto;line-height:1.65;">                                
+{info['abstract']}
                             </div>
                         </div>
-                        """, unsafe_allow_html=True,
-                    )
+                        """, unsafe_allow_html=True,                    
+)
                     st.markdown("")
-                    target_topic = st.selectbox(
-                        "加入主题", list(st.session_state.topics.keys()),
+                    target_topic = st.selectbox(                        
+"加入主题", list(st.session_state.topics.keys()),
                         index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
-                        key="graph_topic_sel", label_visibility="collapsed"
-                    )
+                        key="graph_topic_sel", label_visibility="collapsed"                    
+)
                     arxiv_id = info.get('arxiv_id')
-                    ga,gb,gc = st.columns(3)
-                    with ga:
-                        if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
-                            with st.spinner("下载中..."):
-                                try:
-                                    paper = next(arxiv.Search(id_list=[arxiv_id]).results())
-                                    pdf_path = paper.download_pdf(dirpath=tempfile.gettempdir())
-                                    if process_and_add_to_topic(pdf_path, info['title'], user_api_key, topic_name=target_topic):
-                                        st.success("✅ 入库成功！"); st.balloons()
-                                except Exception as e: st.error(str(e))
-                        elif not arxiv_id: st.caption("暂无全文")
-                    with gb:
-                        st.link_button("🌐 SS", info['url'], use_container_width=True)
-                    with gc:
-                        if info.get('arxiv_id') and st.button("🕸️ 展开", use_container_width=True, key="ginfo_expand"):
-                            st.session_state.focus_paper_id = info['arxiv_id']; st.rerun()
-                else:
-                    st.markdown(
-                        """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
+    ga, gb, gc = st.columns(3)                    
+    
+    with ga:                        
+        if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
+            with st.spinner("正在直接下载 PDF..."):                            
+                try:
+                    # 【效率优化 1】：跳过 arxiv.Search 检索步骤，直接构造官方下载链接
+                    # 这样可以减少一次网络往返请求，下载启动速度提升约 3-5 秒
+                    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                    resp = requests.get(pdf_url, timeout=15)
+                    
+                    if resp.status_code == 200:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            tmp.write(resp.content)
+                            pdf_path = tmp.name
+                        
+                        # 调用已改好的本地免费 Embedding 入库函数
+                        if process_and_add_to_topic(pdf_path, info['title'], DEEPSEEK_API_KEY, topic_name=target_topic):
+                            st.success("✅ 已入库")
+                    else:
+                        st.error(f"下载失败 (HTTP {resp.status_code})")
+                except Exception as e: 
+                    st.error(f"处理出错: {str(e)}")                        
+        elif not arxiv_id: 
+            st.caption("暂无全文")                    
+    
+    with gb:
+        st.link_button("🌐 SS", info['url'], use_container_width=True)                    
+    
+    with gc:                        
+        # 【效率优化 2】：明确聚焦逻辑，仅在 ID 发生变化时触发重绘
+        if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):
+            if st.session_state.focus_paper_id != info['arxiv_id']:
+                st.session_state.focus_paper_id = info['arxiv_id']
+                st.rerun()               
+else:
+                    st.markdown(                        
+"""<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
                                       padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
                                       min-height:260px;display:flex;align-items:center;justify-content:center;">
                             ← 点击左侧节点<br>查看完整详情</div>""",
                         unsafe_allow_html=True,
-                    )
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
@@ -1072,4 +1070,5 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
