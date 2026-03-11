@@ -578,7 +578,7 @@ with tab_main:
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 refined = search_query                
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
+                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
             
             # 取消 max_results 限制，保存为 generator，并切取前 50 篇
             raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
