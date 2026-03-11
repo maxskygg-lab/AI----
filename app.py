@@ -5,18 +5,17 @@ import arxiv, requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_agraph import agraph, Node, Edge, Config
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # ================= 1. 环境检查 =================
 try:
-    import langchain_google_genai, langchain_community, fitz
+    import zhipuai, langchain_community, fitz
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}。请确保 requirements.txt 包含 langchain-google-genai"); st.stop()
+    st.error(f"🚑 环境缺失库 -> {e.name}"); st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.embeddings import ZhipuAIEmbeddings
+from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
@@ -94,7 +93,7 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 v5")
 
 # ================= API Key =================
-USER_API_KEY = st.secrets["GOOGLE_API_KEY"] 
+USER_API_KEY = st.secrets["ZHIPU_API_KEY"]
 SS_API_KEY   = st.secrets["SS_API_KEY"]
 
 # ================= 3. 状态初始化 =================
@@ -294,8 +293,7 @@ def get_one_line_contribution(abstract, title, api_key):
     if key in st.session_state.contributions_cache:
         return st.session_state.contributions_cache[key]
     try:
-        # 替换为 Gemini 模型
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key, temperature=0.0)
+        llm = ChatZhipuAI(model="glm-4-flash", api_key=api_key, temperature=0.0)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
             f"只输出这一句话，不要前缀或解释。\n\n标题：{title}\n摘要：{abstract[:600]}"
@@ -318,92 +316,38 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         for doc in docs:
             doc.metadata['source_paper'] = file_name
             doc.metadata['topic'] = topic_name
-        
-        # 分块逻辑保持不变，这是你之前的精细化策略
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=600, chunk_overlap=200,
             separators=["\n\n","\n","。","."," ",""]
         )
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
-
-        
-        embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001", 
-        google_api_key=api_key,
-        task_type="retrieval_document"
-        )
-
-       # === 修改后的稳健入库逻辑 ===
-        # 1. 调小 batch 以减少单个请求的体积，同时增加 sleep 间隔
-        # === 核心修复：限流版批量入库逻辑 ===
-        safe_batch = 30  # 每批处理 30 个分块
-        
-        # 1. 初始化或定位起始位置
+        embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+        batch = 10
         if t["db"] is None:
-            # 初始第一批，用于创建数据库
-            initial_batch = chunks[:safe_batch]
-            t["db"] = FAISS.from_documents(initial_batch, embeddings)
-            remaining_chunks = chunks[safe_batch:]
+            t["db"] = FAISS.from_documents(chunks[:batch], embeddings)
+            for i in range(batch, len(chunks), batch):
+                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
         else:
-            # 已有数据库，处理全部新分块
-            remaining_chunks = chunks
-
-        # 2. 循环添加，并强制加入“冷却时间”
-        if remaining_chunks:
-            # 使用 Streamlit 进度条显示进度
-            progress_bar = st.progress(0, text="📡 正在同步向量数据到索引...")
-            total_chunks = len(remaining_chunks)
-            total_steps = math.ceil(total_chunks / safe_batch)
-            
-            for i in range(0, total_chunks, safe_batch):
-                batch_to_add = remaining_chunks[i : i + safe_batch]
-                
-                # 执行入库
-                t["db"].add_documents(batch_to_add)
-                
-                # 更新进度条
-                current_step = (i // safe_batch) + 1
-                progress_text = f"⏳ 已入库 {min((i + safe_batch), total_chunks)}/{total_chunks} 块 (配额冷却中...)"
-                progress_bar.progress(current_step / total_steps, text=progress_text)
-                
-                # 3. 关键：强制休眠。
-                # 免费版限制为 100 RPM（每分钟请求数）。
-                # 处理大文件时，每秒一个请求都可能触发限制，这里休眠 3 秒是最稳妥的。
-                time.sleep(3) 
-            
-            progress_bar.empty()
-
-        # 4. 后续逻辑：更新文件列表和通知
+            for i in range(0, len(chunks), batch):
+                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
         if file_name not in t["files"]:
             t["files"].append(file_name)
-            
         st.session_state.chat_history.append({
             "role": "system_notice",
             "content": f"📚 《{file_name}》已加入主题「{topic_name}」。"
         })
         return True
-
     except Exception as e:
-        # 专门针对 429 频率限制报错进行友好提示
-        if "429" in str(e):
-            st.error("🚀 速度太快啦！API 额度暂时耗尽，请等待 1 分钟后重试。")
-        else:
-            st.error(f"处理失败: {e}")
-        return False
+        st.error(f"处理失败: {e}"); return False
 
 def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
-    
-    embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/gemini-embedding-001", 
-    google_api_key=api_key,
-    task_type="retrieval_document"
-    )
+    embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+    t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
 def detect_knowledge_gap(answer_text, docs):
-    # 此逻辑属于业务逻辑，不涉及 API 替换，保持原样即可
     sigs = ["资料不足","没有找到","无法回答","未提及","不清楚","没有相关","cannot find","not mentioned"]
     if len(docs) < 3: return True
     for s in sigs:
@@ -411,11 +355,11 @@ def detect_knowledge_gap(answer_text, docs):
     return False
 
 def get_gap_recommendations():
-    # 此逻辑属于数据处理，不涉及 API 替换，保持原样即可
     loaded = set()
     for t in st.session_state.topics.values(): loaded.update(t["files"])
     return [r for r in st.session_state.graph_references_cache
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
+
 # ── 关键词追踪 ──
 def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
     try:
@@ -952,9 +896,7 @@ with tab_read:
                             f"### 用户问题：\n{prompt}"
                         )
                         
-                        # --- 核心对齐修复部分 ---
-                        llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", google_api_key=user_api_key, temperature=0.1)
-                        # 确保下面这一行开头的空格和上面的 llm 完全垂直对齐
+                        llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         answer = fix_latex(llm.invoke(sys_p).content)
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
@@ -1114,14 +1056,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
-
-
-
-
-
-
-
-
-
