@@ -572,12 +572,12 @@ with tab_main:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:        
-    with st.spinner("检索论文中..."):            
-        try:
-            asort = arxiv.SortCriterion.Relevance                
-            if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-            refined = search_query                
-            if " " in search_query and "AND" not in search_query and '"' not in search_query:
+        with st.spinner("检索论文中..."):            
+            try:
+                asort = arxiv.SortCriterion.Relevance                
+                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                refined = search_query                
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
                 refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
             
             # 取消 max_results 限制，保存为 generator，并切取前 50 篇
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
