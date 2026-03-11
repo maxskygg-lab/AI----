@@ -617,29 +617,29 @@ with tab_main:
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
-    st.markdown(f"""
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;
-                    border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
-            <div style="font-size:.93em;font-weight:700;color:#1e293b;
-                        margin-bottom:10px;line-height:1.4;">
-                📑 {info['title']}
+        st.markdown(f"""
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;
+                        border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
+                <div style="font-size:.93em;font-weight:700;color:#1e293b;
+                            margin-bottom:10px;line-height:1.4;">
+                    📑 {info['title']}
+                </div>
+                <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+                    <span style="background:#e0e7ff;color:#3730a3;padding:2px 10px;
+                                 border-radius:12px;font-size:.8em;font-weight:600;">
+                        📅 {info['year'] or '年份未知'}
+                    </span>
+                    <span style="background:#fee2e2;color:#991b1b;padding:2px 10px;
+                                 border-radius:12px;font-size:.8em;font-weight:600;">
+                        🔥 {info['cites']} 引用
+                    </span>
+                </div>
+                <div style="font-size:.82em;color:#475569;
+                            max-height:320px;overflow-y:auto;line-height:1.65;">                                
+                    {info['abstract']}
+                </div>
             </div>
-            <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
-                <span style="background:#e0e7ff;color:#3730a3;padding:2px 10px;
-                             border-radius:12px;font-size:.8em;font-weight:600;">
-                    📅 {info['year'] or '年份未知'}
-                </span>
-                <span style="background:#fee2e2;color:#991b1b;padding:2px 10px;
-                             border-radius:12px;font-size:.8em;font-weight:600;">
-                    🔥 {info['cites']} 引用
-                </span>
-            </div>
-            <div style="font-size:.82em;color:#475569;
-                        max-height:320px;overflow-y:auto;line-height:1.65;">                                
-                {info['abstract']}
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
     st.markdown("")
     target_topic = st.selectbox(                        
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
