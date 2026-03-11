@@ -674,22 +674,24 @@ with tab_main:
         elif not arxiv_id: 
             st.caption("暂无全文")                    
     
-    with gb:
+with gb:
         st.link_button("🌐 SS", info['url'], use_container_width=True)                    
-    
+
     with gc:                        
         # 效率优化：仅在 ID 变化时触发重绘，减少不必要的 rerun 频率
         if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):
             if st.session_state.focus_paper_id != info['arxiv_id']:
                 st.session_state.focus_paper_id = info['arxiv_id']
                 st.rerun()
+# 注意：此处的 else 必须与 if st.session_state.focus_paper_id: 对齐
 else:
-                    st.markdown(                        
-"""<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
-                                      padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
-                                      min-height:260px;display:flex;align-items:center;justify-content:center;">
-                            ← 点击左侧节点<br>查看完整详情</div>""",
-                        unsafe_allow_html=True,
+    st.markdown(                        
+        """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
+                      padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
+                      min-height:260px;display:flex;align-items:center;justify-content:center;">
+              ← 点击左侧节点<br>查看完整详情</div>""",
+        unsafe_allow_html=True,
+    )
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
@@ -1071,6 +1073,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
