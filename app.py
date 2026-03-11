@@ -651,48 +651,47 @@ with tab_main:
     arxiv_id = info.get('arxiv_id')
     ga, gb, gc = st.columns(3)                    
     
-    with ga:                        
+   with ga:                        
         if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
             with st.spinner("正在直接下载 PDF..."):                            
                 try:
                     # 效率优化：不再通过 arxiv.Search 检索元数据，直接拼接官方 PDF 链接
                     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-                    resp = requests.get(pdf_url, timeout=15)
-                    
-                    if resp.status_code == 200:
+                    resp = requests.get(pdf_url, timeout=15)                                        
+                    if resp.status_code == 200:                        
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                             tmp.write(resp.content)
-                            pdf_path = tmp.name
-                        
-                        # 调用已改好的本地免费 Embedding 函数入库
+                            pdf_path = tmp.name                                                
+                        # 调用已改好的本地免费 Embedding 函数入库                        
                         if process_and_add_to_topic(pdf_path, info['title'], DEEPSEEK_API_KEY, topic_name=target_topic):
-                            st.success("✅ 已入库")
+                            st.success("✅ 已入库")                    
                     else:
-                        st.error(f"下载失败 (HTTP {resp.status_code})")
+                        st.error(f"下载失败 (HTTP {resp.status_code})")                
                 except Exception as e: 
-                    st.error(f"处理失败: {str(e)}")                        
+                    st.error(f"处理失败: {str(e)}")                                
         elif not arxiv_id: 
-            st.caption("暂无全文")                    
-    
-with gb:
-        st.link_button("🌐 SS", info['url'], use_container_width=True)                    
+            st.caption("暂无全文")                        
 
-    with gc:                        
-        # 效率优化：仅在 ID 变化时触发重绘，减少不必要的 rerun 频率
-        if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):
+    with gb:
+        st.link_button("🌐 SS", info['url'], use_container_width=True)                    
+    
+    with gc:                                
+        # 效率优化：仅在 ID 变化时触发重绘，减少不必要的 rerun 频率        
+        if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
             if st.session_state.focus_paper_id != info['arxiv_id']:
                 st.session_state.focus_paper_id = info['arxiv_id']
                 st.rerun()
-# 注意：此处的 else 必须与 if st.session_state.focus_paper_id: 对齐
+
+# 注意：此处的 else 必须与最外层的 if st.session_state.focus_paper_id: 保持垂直对齐
 else:
-    st.markdown(                        
+    st.markdown(                                
         """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
                       padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
                       min-height:260px;display:flex;align-items:center;justify-content:center;">
               ← 点击左侧节点<br>查看完整详情</div>""",
-        unsafe_allow_html=True,
+        unsafe_allow_html=True,    
     )
-
+    
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -1073,6 +1072,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
