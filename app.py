@@ -580,17 +580,17 @@ with tab_main:
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
             
-            # 取消 max_results 限制，保存为 generator，并切取前 50 篇
-            raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
-            st.session_state.search_generator = raw_gen
-            raw = list(itertools.islice(raw_gen, 50))                
-            st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-            st.session_state.citations_loaded = False
-            # 关键：清空缓存，确保新搜索的结果没有旧的摘要
-            st.session_state.contributions_cache = {}
-            st.session_state.focus_paper_id = None            
-        except Exception as e: 
-            st.error(f"检索失败: {e}")
+                # 取消 max_results 限制，保存为 generator，并切取前 50 篇
+                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                st.session_state.search_generator = raw_gen
+                raw = list(itertools.islice(raw_gen, 50))                
+                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                st.session_state.citations_loaded = False
+                # 关键：清空缓存，确保新搜索的结果没有旧的摘要
+                st.session_state.contributions_cache = {}
+                st.session_state.focus_paper_id = None            
+            except Exception as e: 
+                st.error(f"检索失败: {e}")
 
     if st.session_state.search_results:
         t0 = time.time()            
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
