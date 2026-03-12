@@ -616,7 +616,7 @@ with tab_main:
         st.rerun()
 
     # ── 图谱区 ──
-    iif st.session_state.focus_paper_id:
+    if st.session_state.focus_paper_id:
     st.markdown(f"""
             <div style="background:#f8fafc;border:1px solid #e2e8f0;
                         border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
