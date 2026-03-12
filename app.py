@@ -615,10 +615,11 @@ with tab_main:
         preload_top_graphs(st.session_state.search_results, ss_key=SS_API_KEY, top_n=3)
         st.rerun()
 
-# ── 图谱区 ──
-    # 逻辑修改点：只有当 focus_paper_id 有值时，才触发图谱渲染和详情显示
+# ── 图谱 & 详情展示区 ──
+    # 逻辑核心：只有当 focus_paper_id 被激活（点击了图谱按钮）时，才渲染整个详情和图谱板块
     if st.session_state.focus_paper_id:
         with st.spinner("生成引用关系网络..."):
+            # 获取图谱数据
             graph_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=SS_API_KEY)
             clicked_node, details = render_connected_graph(graph_data)
         
@@ -689,6 +690,7 @@ with tab_main:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
 
+    # 这里原本有一个大的 else: 渲染提示框逻辑，现已彻底删除
     # --- 关键修改点：删除了原本显示“点击左侧节点”的 else 区块 ---
     # 现在当没有 focus_paper_id 时，这里将什么都不渲染，保持界面干净
     
@@ -1081,6 +1083,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
