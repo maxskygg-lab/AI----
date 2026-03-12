@@ -616,8 +616,8 @@ with tab_main:
         st.rerun()
 
     # ── 图谱区 ──
-    if st.session_state.focus_paper_id:
-        st.markdown(f"""
+    iif st.session_state.focus_paper_id:
+    st.markdown(f"""
             <div style="background:#f8fafc;border:1px solid #e2e8f0;
                         border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
                 <div style="font-size:.93em;font-weight:700;color:#1e293b;
@@ -651,7 +651,7 @@ with tab_main:
     arxiv_id = info.get('arxiv_id')
     ga, gb, gc = st.columns(3)                    
     
-   with ga:                        
+    with ga:                        
         if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
             with st.spinner("正在直接下载 PDF..."):                            
                 try:
@@ -691,7 +691,6 @@ else:
               ← 点击左侧节点<br>查看完整详情</div>""",
         unsafe_allow_html=True,    
     )
-    
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -1072,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
