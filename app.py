@@ -616,14 +616,12 @@ with tab_main:
         st.rerun()
 
 # ── 图谱 & 详情展示区 ──
-    # 逻辑核心：只有当 focus_paper_id 被激活（点击了图谱按钮）时，才渲染整个详情和图谱板块
+    # 核心修改：只有在 focus_paper_id 不为空时（即点击了图谱按钮后），才进入显示逻辑
     if st.session_state.focus_paper_id:
         with st.spinner("生成引用关系网络..."):
-            # 获取图谱数据
             graph_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=SS_API_KEY)
             clicked_node, details = render_connected_graph(graph_data)
         
-        # 确定显示 ID 和 info 数据
         display_id = clicked_node if clicked_node else get_pure_arxiv_id(st.session_state.focus_paper_id)
         info = details.get(display_id)
 
@@ -690,10 +688,8 @@ with tab_main:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
 
-    # 这里原本有一个大的 else: 渲染提示框逻辑，现已彻底删除
-    # --- 关键修改点：删除了原本显示“点击左侧节点”的 else 区块 ---
-    # 现在当没有 focus_paper_id 时，这里将什么都不渲染，保持界面干净
-    
+    # 原有的 else: 逻辑（显示虚线框提示的板块）已被彻底删除
+    # 这样在没有点击“图谱”按钮之前，界面顶部将完全留白，不显示任何字样
     # 核心改进：只有在“既没聚焦”且“还没搜索”时，才显示占位提示
     elif not st.session_state.search_results:
         st.markdown(                                
@@ -1083,6 +1079,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
