@@ -616,13 +616,13 @@ with tab_main:
         st.rerun()
 
 # ── 图谱区 ──
+    # 逻辑修改点：只有当 focus_paper_id 有值时，才触发图谱渲染和详情显示
     if st.session_state.focus_paper_id:
-        # 1. 获取并渲染图谱数据（需调用之前定义的 fetch_graph_data 和 render_connected_graph）
-        with st.spinner("生成引用网络..."):
+        with st.spinner("生成引用关系网络..."):
             graph_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=SS_API_KEY)
             clicked_node, details = render_connected_graph(graph_data)
         
-        # 2. 确定当前要展示的论文信息
+        # 确定显示 ID 和 info 数据
         display_id = clicked_node if clicked_node else get_pure_arxiv_id(st.session_state.focus_paper_id)
         info = details.get(display_id)
 
@@ -688,6 +688,9 @@ with tab_main:
                     if st.session_state.focus_paper_id != info['arxiv_id']:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
+
+    # --- 关键修改点：删除了原本显示“点击左侧节点”的 else 区块 ---
+    # 现在当没有 focus_paper_id 时，这里将什么都不渲染，保持界面干净
     
     # 核心改进：只有在“既没聚焦”且“还没搜索”时，才显示占位提示
     elif not st.session_state.search_results:
@@ -1078,6 +1081,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
