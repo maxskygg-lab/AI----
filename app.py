@@ -615,20 +615,18 @@ with tab_main:
         preload_top_graphs(st.session_state.search_results, ss_key=SS_API_KEY, top_n=3)
         st.rerun()
 
-    # ── 图谱区 ──
-   # ── 图谱区 ──
+# ── 图谱区 ──
     if st.session_state.focus_paper_id:
-        # 1. 获取图谱数据并渲染
-        with st.spinner("生成引用关系网络..."):
+        # 1. 获取并渲染图谱数据（需调用之前定义的 fetch_graph_data 和 render_connected_graph）
+        with st.spinner("生成引用网络..."):
             graph_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=SS_API_KEY)
             clicked_node, details = render_connected_graph(graph_data)
         
-        # 2. 确定当前展示的论文信息（优先展示点击的节点，默认展示种子论文）
+        # 2. 确定当前要展示的论文信息
         display_id = clicked_node if clicked_node else get_pure_arxiv_id(st.session_state.focus_paper_id)
         info = details.get(display_id)
 
         if info:
-            # 渲染详情卡片
             st.markdown(f"""
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;
                             border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
@@ -690,13 +688,14 @@ with tab_main:
                     if st.session_state.focus_paper_id != info['arxiv_id']:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
-    # 修正点：else 必须与 if st.session_state.focus_paper_id 对齐
-    else:
+    
+    # 核心改进：只有在“既没聚焦”且“还没搜索”时，才显示占位提示
+    elif not st.session_state.search_results:
         st.markdown(                                
             """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
                           padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
                           min-height:260px;display:flex;align-items:center;justify-content:center;">
-                  ← 点击左侧节点<br>查看完整详情</div>""",
+                  ← 点击列表中的“🕸️ 图谱”按钮<br>查看引用连接详情</div>""",
             unsafe_allow_html=True,    
         )
     # ── 检索结果列表 ──
@@ -1079,6 +1078,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
