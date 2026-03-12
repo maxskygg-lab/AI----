@@ -688,17 +688,15 @@ with tab_main:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
 
-    # 原有的 else: 逻辑（显示虚线框提示的板块）已被彻底删除
-    # 这样在没有点击“图谱”按钮之前，界面顶部将完全留白，不显示任何字样
-    # 核心改进：只有在“既没聚焦”且“还没搜索”时，才显示占位提示
-    elif not st.session_state.search_results:
-        st.markdown(                                
-            """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
-                          padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
-                          min-height:260px;display:flex;align-items:center;justify-content:center;">
-                  ← 点击列表中的“🕸️ 图谱”按钮<br>查看引用连接详情</div>""",
-            unsafe_allow_html=True,    
-        )
+    
+    with gc:                                
+                if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
+                    if st.session_state.focus_paper_id != info['arxiv_id']:
+                        st.session_state.focus_paper_id = info['arxiv_id']
+                        st.rerun()
+
+    # --- 删除了原本的 elif not st.session_state.search_results 块 ---
+    # 删掉后，当没有聚焦论文时，顶部将保持留白，不再显示虚线框提示。
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -1079,6 +1077,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
