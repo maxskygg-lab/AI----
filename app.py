@@ -616,81 +616,89 @@ with tab_main:
         st.rerun()
 
     # ── 图谱区 ──
+   # ── 图谱区 ──
     if st.session_state.focus_paper_id:
-        st.markdown(f"""
-            <div style="background:#f8fafc;border:1px solid #e2e8f0;
-                        border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
-                <div style="font-size:.93em;font-weight:700;color:#1e293b;
-                            margin-bottom:10px;line-height:1.4;">
-                    📑 {info['title']}
-                </div>
-                <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
-                    <span style="background:#e0e7ff;color:#3730a3;padding:2px 10px;
-                                 border-radius:12px;font-size:.8em;font-weight:600;">
-                        📅 {info['year'] or '年份未知'}
-                    </span>
-                    <span style="background:#fee2e2;color:#991b1b;padding:2px 10px;
-                                 border-radius:12px;font-size:.8em;font-weight:600;">
-                        🔥 {info['cites']} 引用
-                    </span>
-                </div>
-                <div style="font-size:.82em;color:#475569;
-                            max-height:320px;overflow-y:auto;line-height:1.65;">                                
-                    {info['abstract']}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        # 1. 获取图谱数据并渲染
+        with st.spinner("生成引用关系网络..."):
+            graph_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=SS_API_KEY)
+            clicked_node, details = render_connected_graph(graph_data)
+        
+        # 2. 确定当前展示的论文信息（优先展示点击的节点，默认展示种子论文）
+        display_id = clicked_node if clicked_node else get_pure_arxiv_id(st.session_state.focus_paper_id)
+        info = details.get(display_id)
 
-    st.markdown("")
-    target_topic = st.selectbox(                        
-        "加入主题", list(st.session_state.topics.keys()),
-        index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
-        key="graph_topic_sel", label_visibility="collapsed"                    
-    )
-    
-    arxiv_id = info.get('arxiv_id')
-    ga, gb, gc = st.columns(3)                    
-    
-    with ga:                        
-        if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
-            with st.spinner("正在直接下载 PDF..."):                            
-                try:
-                    # 效率优化：不再通过 arxiv.Search 检索元数据，直接拼接官方 PDF 链接
-                    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-                    resp = requests.get(pdf_url, timeout=15)                                        
-                    if resp.status_code == 200:                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                            tmp.write(resp.content)
-                            pdf_path = tmp.name                                                
-                        # 调用已改好的本地免费 Embedding 函数入库                        
-                        if process_and_add_to_topic(pdf_path, info['title'], DEEPSEEK_API_KEY, topic_name=target_topic):
-                            st.success("✅ 已入库")                    
-                    else:
-                        st.error(f"下载失败 (HTTP {resp.status_code})")                
-                except Exception as e: 
-                    st.error(f"处理失败: {str(e)}")                                
-        elif not arxiv_id: 
-            st.caption("暂无全文")                        
+        if info:
+            # 渲染详情卡片
+            st.markdown(f"""
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;
+                            border-left:4px solid #6366f1;border-radius:10px;padding:14px 16px;">
+                    <div style="font-size:.93em;font-weight:700;color:#1e293b;
+                                margin-bottom:10px;line-height:1.4;">
+                        📑 {info['title']}
+                    </div>
+                    <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+                        <span style="background:#e0e7ff;color:#3730a3;padding:2px 10px;
+                                     border-radius:12px;font-size:.8em;font-weight:600;">
+                            📅 {info['year'] or '年份未知'}
+                        </span>
+                        <span style="background:#fee2e2;color:#991b1b;padding:2px 10px;
+                                     border-radius:12px;font-size:.8em;font-weight:600;">
+                            🔥 {info['cites']} 引用
+                        </span>
+                    </div>
+                    <div style="font-size:.82em;color:#475569;
+                                max-height:320px;overflow-y:auto;line-height:1.65;">                                
+                        {info['abstract']}
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
 
-    with gb:
-        st.link_button("🌐 SS", info['url'], use_container_width=True)                    
-    
-    with gc:                                
-        # 效率优化：仅在 ID 变化时触发重绘，减少不必要的 rerun 频率        
-        if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
-            if st.session_state.focus_paper_id != info['arxiv_id']:
-                st.session_state.focus_paper_id = info['arxiv_id']
-                st.rerun()
-
-# 注意：此处的 else 必须与最外层的 if st.session_state.focus_paper_id: 保持垂直对齐
-        else:
-            st.markdown(                                
-                """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
-                              padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
-                              min-height:260px;display:flex;align-items:center;justify-content:center;">
-                      ← 点击左侧节点<br>查看完整详情</div>""",
-                unsafe_allow_html=True,    
+            st.markdown("")
+            target_topic = st.selectbox(                        
+                "加入主题", list(st.session_state.topics.keys()),
+                index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
+                key="graph_topic_sel", label_visibility="collapsed"                    
             )
+            
+            arxiv_id = info.get('arxiv_id')
+            ga, gb, gc = st.columns(3)                    
+            
+            with ga:                        
+                if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):                            
+                    with st.spinner("正在直接下载 PDF..."):                            
+                        try:
+                            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                            resp = requests.get(pdf_url, timeout=15)                                        
+                            if resp.status_code == 200:                        
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                    tmp.write(resp.content)
+                                    pdf_path = tmp.name                                                
+                                if process_and_add_to_topic(pdf_path, info['title'], USER_API_KEY, topic_name=target_topic):
+                                    st.success("✅ 已入库")                    
+                            else:
+                                st.error(f"下载失败 (HTTP {resp.status_code})")                
+                        except Exception as e: 
+                            st.error(f"处理失败: {str(e)}")                                
+                elif not arxiv_id: 
+                    st.caption("暂无全文")                        
+
+            with gb:
+                st.link_button("🌐 SS", info['url'], use_container_width=True)                    
+            
+            with gc:                                
+                if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
+                    if st.session_state.focus_paper_id != info['arxiv_id']:
+                        st.session_state.focus_paper_id = info['arxiv_id']
+                        st.rerun()
+    # 修正点：else 必须与 if st.session_state.focus_paper_id 对齐
+    else:
+        st.markdown(                                
+            """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
+                          padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
+                          min-height:260px;display:flex;align-items:center;justify-content:center;">
+                  ← 点击左侧节点<br>查看完整详情</div>""",
+            unsafe_allow_html=True,    
+        )
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -1071,6 +1079,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
