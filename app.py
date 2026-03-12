@@ -683,14 +683,14 @@ with tab_main:
                 st.rerun()
 
 # 注意：此处的 else 必须与最外层的 if st.session_state.focus_paper_id: 保持垂直对齐
-else:
-    st.markdown(                                
-        """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
-                      padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
-                      min-height:260px;display:flex;align-items:center;justify-content:center;">
-              ← 点击左侧节点<br>查看完整详情</div>""",
-        unsafe_allow_html=True,    
-    )
+    else:
+        st.markdown(                                
+            """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
+                          padding:40px 16px;text-align:center;color:#94a3b8;font-size:.88em;
+                          min-height:260px;display:flex;align-items:center;justify-content:center;">
+                  ← 点击左侧节点<br>查看完整详情</div>""",
+            unsafe_allow_html=True,    
+        )
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -1071,6 +1071,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
