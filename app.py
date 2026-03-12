@@ -688,10 +688,7 @@ with tab_main:
                         st.session_state.focus_paper_id = info['arxiv_id']
                         st.rerun()
 
-    
-            
     # --- 删除了原本的 elif not st.session_state.search_results 块 ---
-    # 删掉后，当没有聚焦论文时，顶部将保持留白，不再显示虚线框提示。
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -748,9 +745,9 @@ with tab_main:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
-        
-       # 这里的缩进必须与上方的 for 循环对齐
-        # 修改点：加载更多功能（自动分析前 50 篇）
+
+    # 这里的缩进必须与上方的 for 循环对齐
+    # 修改点：加载更多功能（自动分析前 50 篇）
     if st.session_state.search_generator:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
@@ -1072,6 +1069,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
