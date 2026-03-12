@@ -689,12 +689,7 @@ with tab_main:
                         st.rerun()
 
     
-             with gc:                                
-                    if info.get('arxiv_id') and st.button("🕸️ 聚焦", use_container_width=True, key="ginfo_expand"):            
-                        if st.session_state.focus_paper_id != info['arxiv_id']:
-                            st.session_state.focus_paper_id = info['arxiv_id']
-                            st.rerun()
-
+            
     # --- 删除了原本的 elif not st.session_state.search_results 块 ---
     # 删掉后，当没有聚焦论文时，顶部将保持留白，不再显示虚线框提示。
     # ── 检索结果列表 ──
@@ -1077,6 +1072,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
