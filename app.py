@@ -816,7 +816,7 @@ with tab_read:
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
-        if send_btn and user_input.strip():
+if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.spinner("深度检索资料并对比中..."):
@@ -825,21 +825,34 @@ with tab_read:
                     scope = st.session_state.selected_scope
                     
                     docs = []
-                    # 核心改进：针对“对比”场景优化检索
+                    
+                    # 核心改进：针对“对比”场景优化检索，彻底解决 FAISS filter 导致单篇论文掉队的问题
                     if scope == "🌐 对比所有论文":
-                        # 1. 首先进行全局 MMR 检索
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
+                        # 1. 大基数召回：先不加任何过滤，一口气捞出最相关的 40 条片段（扩大搜索池）
+                        raw_docs = t["db"].max_marginal_relevance_search(prompt, k=40, fetch_k=60, lambda_mult=0.5)
                         
-                        # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
-                        if len(t["files"]) > 1:
-                            existing_sources = set(d.metadata.get('source_paper') for d in docs)
-                            # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
-                            for paper_name in t["files"]:
-                                if paper_name not in existing_sources:
-                                    extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
-                                    docs.extend(extra_docs)
+                        # 2. 手动均衡分配：算出每篇论文理论上应该分到几个片段（比如 15条 ÷ 2篇 = 每篇保底 7条）
+                        papers_in_topic = t["files"]
+                        target_per_paper = max(3, sk // len(papers_in_topic) if len(papers_in_topic) > 0 else sk)
+                        
+                        paper_counts = {p: 0 for p in papers_in_topic}
+                        
+                        # 第一轮：强制公平分配。遍历刚才捞出的 40 条，优先给没吃饱的论文发片段
+                        for d in raw_docs:
+                            src = d.metadata.get('source_paper')
+                            if src in paper_counts and paper_counts[src] < target_per_paper:
+                                docs.append(d)
+                                paper_counts[src] += 1
+                                
+                        # 第二轮：如果第一轮分完，总数还没达到我们的目标(sk条)，就把剩下的按相关度补齐
+                        if len(docs) < sk:
+                            for d in raw_docs:
+                                if len(docs) >= sk: 
+                                    break
+                                if d not in docs:
+                                    docs.append(d)
                     else:
-                        # 单篇论文检索
+                        # 单篇论文检索（保持原样，因为此时不需要均衡对比）
                         fd = {"source_paper": scope}
                         docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
 
@@ -864,7 +877,7 @@ with tab_read:
                             f"### 检索到的资料：\n{context}\n\n"                            
                             f"### 用户问题：\n{prompt}"                        
                         )                        
-                        # 切换为 DeepSeek 引擎 (保留原有的 DeepSeek 设定，不擅自替换为你参考代码的智谱模型)
+                        
                         llm = ChatOpenAI(
                             model='deepseek-chat', 
                             openai_api_key=DEEPSEEK_API_KEY, 
@@ -882,7 +895,6 @@ with tab_read:
                     st.rerun()
                 except Exception as e: 
                     st.error(f"生成出错: {e}")
-
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
 # ══════════════════════════════════════════
@@ -1037,3 +1049,4 @@ with tab_notes:
 # 3. 提升了基础检索深度：对比模式下的 fetch_k 从 30 提升至 40，备选片段更多，减少漏检。
 # 4. 优化了 Prompt 引导：要求模型在无法找到对比方信息时如实说明，而非直接报错。
 # 5. 除上述逻辑增强外，未改动任何 UI 布局、变量名或样式代码。
+
