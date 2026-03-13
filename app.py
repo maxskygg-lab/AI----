@@ -811,7 +811,7 @@ with tab_read:
         ci1, ci2 = st.columns([6, 1])
         with ci1:
             user_input = st.text_input("提问", placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
-                                       label_visibility="collapsed", key="chat_input_box")
+                                        label_visibility="collapsed", key="chat_input_box")
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
@@ -820,81 +820,84 @@ with tab_read:
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.spinner("深度检索资料并对比中..."):
                 try:
-                    sk = 15 if "精读" in reading_mode else 10
                     scope = st.session_state.selected_scope
+                    final_docs = []
                     
-                    docs = []
-                    # 核心改进：针对“对比”场景优化检索，确保多方视角
+                    # 核心修改：分策略检索逻辑
                     if scope == "🌐 对比所有论文":
-                        # 1. 首先进行基础 MMR 检索（保持多样性），提升 fetch_k 增加候选深度
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=50, lambda_mult=0.5)
+                        # 计算每篇论文应分配的配额，确保公平
+                        # 精读模式每篇检索 8 个片段，快速问答每篇 5 个
+                        per_paper_k = 8 if "精读" in reading_mode else 5
                         
-                        # 2. 增强逻辑：如果存在多篇论文，强制补齐每篇论文的相关片段，解决“单篇霸榜”问题
-                        if len(t["files"]) > 1:
-                            # 统计当前检索结果中包含的来源
-                            existing_sources = set(d.metadata.get('source_paper') for d in docs)
-                            # 遍历所有已入库文件，若某文件片段不足，则通过 Filter 强制追加
-                            for paper_name in t["files"]:
-                                current_paper_docs = [d for d in docs if d.metadata.get('source_paper') == paper_name]
-                                if len(current_paper_docs) < 5: # 确保每篇论文至少贡献5个相关片段
-                                    extra_needed = 5 - len(current_paper_docs)
-                                    extra_docs = t["db"].similarity_search(
-                                        prompt, 
-                                        k=extra_needed, 
-                                        filter={"source_paper": paper_name}
-                                    )
-                                    docs.extend(extra_docs)
+                        for paper_name in t["files"]:
+                            # 关键：通过 filter 强制从每一篇论文中提取最相关的片段
+                            paper_docs = t["db"].similarity_search(
+                                prompt, 
+                                k=per_paper_k, 
+                                filter={"source_paper": paper_name}
+                            )
+                            final_docs.extend(paper_docs)
+                        
+                        # 如果论文总数太少，额外补充全局 MMR 检索以增加背景深度
+                        if len(t["files"]) < 3:
+                            global_docs = t["db"].max_marginal_relevance_search(prompt, k=10, fetch_k=30)
+                            final_docs.extend(global_docs)
                     else:
-                        # 单篇论文检索
-                        fd = {"source_paper": scope}
-                        docs = t["db"].similarity_search(prompt, k=15, filter=fd)
+                        # 单篇论文检索逻辑保持不变
+                        final_docs = t["db"].similarity_search(prompt, k=15, filter={"source_paper": scope})
 
-                    if not docs:
+                    if not final_docs:
                         answer = "未找到相关内容，请尝试换个问法。"
                     else:
-                        # 构建上下文，并显式增强来源展示
+                        # 构造上下文并标注明确的来源提示
                         context_list = []
-                        # 去重处理，防止强制追加时引入重复片段
                         seen_contents = set()
-                        for d in docs:
-                            content_key = d.page_content[:100]
+                        for d in final_docs:
+                            # 简单去重处理
+                            content_key = d.page_content[:150]
                             if content_key not in seen_contents:
                                 src = d.metadata.get('source_paper', '未知来源')
                                 pg = d.metadata.get('page', 0) + 1
-                                context_list.append(f"【文献：{src} | 第 {pg} 页】\n内容：{d.page_content}")
+                                context_list.append(f"【文献来源：{src} | 第 {pg} 页】\n内容片段：{d.page_content}")
                                 seen_contents.add(content_key)
                         
-                        context = "\n\n---\n\n".join(context_list)                        
-                        sys_p = (                            
-                            "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
-                            "### 关键对比任务：\n"                            
-                            "1. 如果用户要求对比，请务必横向扫描所有提供的【文献】来源。\n"
-                            "2. 请清晰地列出不同论文在观点、方法、实验数据或创新点上的【相同点】和【不同点】。\n"                            
-                            "3. 引用时必须严格标注来源，例如：‘[论文A]采用了XX方法，而[论文B]则倾向于YY’。\n"                            
-                            "4. 若资料中某篇论文未涉及相关内容，请说明‘在当前片段中未检索到[论文名]关于该点的论述’，切勿臆造。\n"
-                            "5. 数学公式使用 $...$ 格式。\n\n"                            
-                            f"### 检索到的资料集：\n{context}\n\n"                            
-                            f"### 用户提问：\n{prompt}"                        
-                        )                        
-                        # 切换为 DeepSeek 引擎
+                        context = "\n\n---\n\n".join(context_list)
+                        
+                        sys_p = (
+                            "你是一位资深科研助理。现在你的上下文里包含了多篇不同论文的片段。\n"
+                            "### 强制要求：\n"
+                            "1. 你的任务是对比阅读。请横向扫描所有【文献来源】，不要只盯着其中一篇。\n"
+                            "2. 回答必须包含对比维度（如方法论、指标、结论）。\n"
+                            "3. 引用必须指明来源，如：'根据[论文名A]，其结果优于[论文名B]的...'。\n"
+                            "4. 若某篇论文完全没提到相关信息，请明确指出该论文在该点上信息缺失。\n"
+                            "5. 数学公式使用 $...$ 格式。\n\n"
+                            f"### 待分析资料库：\n{context}\n\n"
+                            f"### 用户指令：\n{prompt}"
+                        )
+                        
                         llm = ChatOpenAI(
                             model='deepseek-chat', 
                             openai_api_key=DEEPSEEK_API_KEY, 
                             openai_api_base='https://api.deepseek.com', 
                             temperature=0.1
                         )
-                        answer = fix_latex(llm.invoke(sys_p).content)                    
+                        answer = fix_latex(llm.invoke(sys_p).content)
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
                     st.session_state.pending_note = {
                         "content": answer, 
                         "question": prompt,
-                        "has_gap": detect_knowledge_gap(answer, docs if docs else [])
+                        "has_gap": detect_knowledge_gap(answer, final_docs)
                     }
                     st.rerun()
                 except Exception as e: 
                     st.error(f"生成出错: {e}")
 
+# 修改说明：
+# 1. 修改了检索策略：从原有的“混合检索”改为“循环过滤检索”。通过 for paper_name in t["files"] 配合 filter 约束，强制让向量数据库针对每一篇已入库论文都返回最相关的 k 个片段。
+# 2. 解决了“单篇霸榜”：避免了检索时高分片段全部挤在同一篇论文里的问题。
+# 3. 增强了提示词：在 sys_p 中明确要求 AI 必须横向扫描所有来源。
+# 4. 优化了上下文构造：在 Context 拼接中加入了更醒目的【文献来源】标签，方便 AI 区分边界。
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
 # ══════════════════════════════════════════
@@ -1049,3 +1052,4 @@ with tab_notes:
 # 3. 提升了检索召回量：基础 MMR 检索的 `fetch_k` 从 40 提高到 50，降低漏掉关键片段的概率。
 # 4. 优化了 `sys_p` (System Prompt)：显式要求 AI 执行“横向扫描”和“对比不同来源”，并明确在无资料时说明来源，防止臆断。
 # 5. 代码严格保持了原有的 UI 组件、变量命名空间和功能逻辑，未做任何非必要的删减。
+
