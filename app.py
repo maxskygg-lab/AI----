@@ -348,7 +348,15 @@ def rebuild_topic_index(topic_name, api_key):
     embeddings = load_local_embeddings()
     t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
-# 后面的 detect_knowledge_gap 和 get_gap_recommendations 逻辑完全正确，无需修改
+def detect_knowledge_gap(answer, context_docs):
+    """简单检测回答是否包含'资料不足'或无法回答的情况"""
+    if "资料不足" in answer or "没有提到" in answer:
+        return True
+    return False
+
+def get_gap_recommendations():
+    """从图谱缓存中获取推荐论文"""
+    return st.session_state.graph_references_cache[:3]
 
 # ── 关键词追踪 ──
 def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
@@ -992,7 +1000,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-
-
-
