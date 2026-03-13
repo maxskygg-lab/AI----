@@ -65,7 +65,7 @@ st.markdown("""
         border-radius:10px; padding:12px; background:#fafafa; margin-bottom:10px;
     }
     .chat-user { background:#dbeafe; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:.9em; }
-    .chat-bot  { background:#f0fdf4; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:.9em; }
+    .chat-bot  { background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:15px; margin:8px 0; font-size:.92em; line-height:1.7; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     .chat-notice { color:#6366f1; font-size:.82em; font-style:italic; margin:4px 0; }
     .section-divider {
         font-size:.72em; text-transform:uppercase; letter-spacing:2px;
@@ -293,7 +293,10 @@ def get_one_line_contribution(abstract, title, api_key):
 
 def fix_latex(text):
     if not text: return text
-    return text.replace(r"\(","$").replace(r"\)","$").replace(r"\[","$$").replace(r"\]","$$")
+    # 修复常见乱码和星号问题
+    text = text.replace(r"\(", "$").replace(r"\)", "$").replace(r"\[", "$$").replace(r"\]", "$$")
+    text = re.sub(r'(?<!\$)\$([^\$\n]+)\$(?!\$)', r'$\1$', text) # 确保单$对齐
+    return text
 
 # 1. 新增这个缓存函数，防止重复加载模型浪费内存
 @st.cache_resource
@@ -348,14 +351,14 @@ def rebuild_topic_index(topic_name, api_key):
     embeddings = load_local_embeddings()
     t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
-def detect_knowledge_gap(answer, context_docs):
-    """简单检测回答是否包含'资料不足'或无法回答的情况"""
-    if "资料不足" in answer or "没有提到" in answer:
+def detect_knowledge_gap(answer, docs):
+    # 模拟知识漏洞检测逻辑
+    if "资料不足" in answer or "未找到相关内容" in answer:
         return True
     return False
 
 def get_gap_recommendations():
-    """从图谱缓存中获取推荐论文"""
+    # 获取图谱缓存中的推荐
     return st.session_state.graph_references_cache[:3]
 
 # ── 关键词追踪 ──
@@ -774,8 +777,19 @@ with tab_read:
             elif msg["role"] == "user":
                 chat_html += f'<div class="chat-user">🧑 {msg["content"]}</div>'
             else:
-                chat_html += f'<div class="chat-bot">🤖 {msg["content"].replace(chr(10),"<br>")}</div>'
-        st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
+                # 使用 chat-bot 样式美化回答，并支持 HTML 渲染（内部 Markdown 会由 st.markdown 处理）
+                pass 
+        
+        # 优化显示：使用 Streamlit 自带容器来更好地处理 Markdown 公式
+        container = st.container()
+        with container:
+            for msg in st.session_state.chat_history[-20:]:
+                if msg["role"] == "system_notice":
+                    st.markdown(f'<div class="chat-notice">📢 {msg["content"]}</div>', unsafe_allow_html=True)
+                elif msg["role"] == "user":
+                    st.markdown(f'<div class="chat-user">🧑 {msg["content"]}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="chat-bot">{msg["content"]}</div>', unsafe_allow_html=True)
 
         # 输入框
         ci1, ci2 = st.columns([6, 1])
@@ -826,10 +840,11 @@ with tab_read:
                         sys_p = (                            
                             "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
                             "### 任务要求：\n"                            
-                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"                            
-                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"                            
-                            "3. 数学公式使用 $...$ 格式。\n"                            
-                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
+                            "1. 排版美观：使用标题、加粗关键字和分点列表。禁止使用无意义的特殊符号或星号作为列表符。\n"
+                            "2. 公式规范：数学公式必须使用标准的 LaTeX 格式（行内使用 $...$，行间使用 $$...$$）。禁止出现乱码，确保括号对齐。\n"
+                            "3. 对比分析：如果涉及多篇论文，请对比其方法论、实验结论的差异，使用“对比”而非简单的堆砌。\n"
+                            "4. 引用透明：引用时请标注来源（如：据[论文A]所述）。\n"
+                            "5. 严谨性：如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
                             f"### 检索到的资料：\n{context}\n\n"                            
                             f"### 用户问题：\n{prompt}"                        
                         )                        
