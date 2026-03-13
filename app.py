@@ -268,7 +268,7 @@ def preload_top_graphs(results, ss_key=None, top_n=3):
         done.add(item['obj'].entry_id)
         time.sleep(0.3)
     ph.caption("✅ 图谱预加载完成")
-
+    
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
     clean_id = get_pure_arxiv_id(arxiv_id)
@@ -1074,3 +1074,4 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
