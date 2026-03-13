@@ -95,7 +95,8 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 v5")
 
 # ================= API Key =================
-USER_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+USER_API_KEY = DEEPSEEK_API_KEY
 SS_API_KEY   = st.secrets["SS_API_KEY"]
 
 # ================= 3. 状态初始化 =================
@@ -1013,6 +1014,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
