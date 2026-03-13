@@ -558,7 +558,7 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
-ab 1：学术检索 & 图谱
+#Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
@@ -1013,5 +1013,6 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
