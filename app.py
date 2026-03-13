@@ -786,64 +786,64 @@ with tab_read:
                     scope = st.session_state.selected_scope
                     
                     docs = []
-                    # 核心改进：针对“对比”场景优化检索
-                    if scope == "🌐 对比所有论文":
-                        # 1. 首先进行全局 MMR 检索
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
-                        
-                        # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
-                        if len(t["files"]) > 1:
-                            existing_sources = set(d.metadata.get('source_paper') for d in docs)
-                            # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
-                            for paper_name in t["files"]:
-                                if paper_name not in existing_sources:
-                                    extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
-                                    docs.extend(extra_docs)
-                    else:
-                        # 单篇论文检索
-                        fd = {"source_paper": scope}
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
+# 核心改进：针对“对比”场景优化检索
+                    try:
+                        if scope == "🌐 对比所有论文":
+                            # 1. 首先进行全局 MMR 检索
+                            docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
+                            
+                            # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
+                            if len(t["files"]) > 1:
+                                existing_sources = set(d.metadata.get('source_paper') for d in docs)
+                                # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
+                                for paper_name in t["files"]:
+                                    if paper_name not in existing_sources:
+                                        extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
+                                        docs.extend(extra_docs)
+                        else:
+                            # 单篇论文检索
+                            fd = {"source_paper": scope}
+                            docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
 
-                    if not docs:
-                        answer = "未找到相关内容，请尝试换个问法。"
-                    else:
-                        # 构建上下文，强调来源标识
-                        context_list = []
-                        for d in docs:
-                            src = d.metadata.get('source_paper', '未知来源')
-                            pg = d.metadata.get('page', 0) + 1
-                            context_list.append(f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}")
+                        if not docs:
+                            answer = "未找到相关内容，请尝试换个问法。"
+                        else:
+                            # 构建上下文，强调来源标识
+                            context_list = []
+                            for d in docs:
+                                src = d.metadata.get('source_paper', '未知来源')
+                                pg = d.metadata.get('page', 0) + 1
+                                context_list.append(f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}")
+                            
+                            context = "\n\n---\n\n".join(context_list)                        
+                            sys_p = (                            
+                                "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
+                                "### 任务要求：\n"                            
+                                "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"                            
+                                "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"                            
+                                "3. 数学公式使用 $...$ 格式。\n"                            
+                                f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
+                                f"### 检索到的资料：\n{context}\n\n"                            
+                                f"### 用户问题：\n{prompt}"                        
+                            )                        
+                            # 切换为 DeepSeek 引擎
+                            llm = ChatOpenAI(
+                                model='deepseek-chat', 
+                                openai_api_key=DEEPSEEK_API_KEY, 
+                                openai_api_base='https://api.deepseek.com', 
+                                temperature=0.1
+                            )
+                            answer = fix_latex(llm.invoke(sys_p).content)                    
                         
-                        context = "\n\n---\n\n".join(context_list)                        
-                        sys_p = (                            
-                            "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
-                            "### 任务要求：\n"                            
-                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"                            
-                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"                            
-                            "3. 数学公式使用 $...$ 格式。\n"                            
-                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
-                            f"### 检索到的资料：\n{context}\n\n"                            
-                            f"### 用户问题：\n{prompt}"                        
-                        )                        
-                        # 切换为 DeepSeek 引擎
-                        llm = ChatOpenAI(
-                            model='deepseek-chat', 
-                            openai_api_key=DEEPSEEK_API_KEY, 
-                            openai_api_base='https://api.deepseek.com', 
-                            temperature=0.1
-                        )
-                        answer = fix_latex(llm.invoke(sys_p).content)                    
-                    
-                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                    # ... 后续逻辑保持不变 ...
-                    st.session_state.pending_note = {
-                        "content": answer, 
-                        "question": prompt,
-                        "has_gap": detect_knowledge_gap(answer, docs if docs else [])
-                    }
-                    st.rerun()
-                except Exception as e: 
-                    st.error(f"生成出错: {e}")
+                        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                        st.session_state.pending_note = {
+                            "content": answer, 
+                            "question": prompt,
+                            "has_gap": detect_knowledge_gap(st.session_state.active_topic, DEEPSEEK_API_KEY)
+                        }
+                        st.rerun()
+                    except Exception as e: 
+                        st.error(f"生成出错: {e}")
 
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
@@ -992,6 +992,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
