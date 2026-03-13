@@ -558,62 +558,45 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
-# Tab 1：学术检索 & 图谱
+ab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
-    
-    # 修改点：移除了原本控制数量的组件，改为只占两列
-    sq1,sq2 = st.columns([4,2])
+    sq1,sq2,sq3 = st.columns([3,1.5,1])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
+    with sq3:
+        max_results = st.number_input("数量",5,50,15, label_visibility="collapsed")
 
-    if st.button("🚀 检索", use_container_width=True) and search_query:        
-        with st.spinner("检索论文中..."):            
+    if st.button("🚀 检索", use_container_width=True) and search_query:
+        with st.spinner("检索论文中..."):
             try:
-                asort = arxiv.SortCriterion.Relevance                
+                asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                refined = search_query                
+                refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])                                
-            
-                # 取消 max_results 限制，保存为 generator，并切取前 50 篇
-                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
-                st.session_state.search_generator = raw_gen
-                raw = list(itertools.islice(raw_gen, 50))                
+                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
+                raw = list(arxiv.Search(query=refined, max_results=max_results, sort_by=asort).results())
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 st.session_state.citations_loaded = False
-                # 关键：清空缓存，确保新搜索的结果没有旧的摘要
                 st.session_state.contributions_cache = {}
-                st.session_state.focus_paper_id = None            
-            except Exception as e: 
-                st.error(f"检索失败: {e}")
+                st.session_state.focus_paper_id = None
+            except Exception as e: st.error(f"检索失败: {e}")
 
-    if st.session_state.search_results:
-        t0 = time.time()            
-        # 修改点：不再提示“自动分析摘要”，只提示同步引用数
-        with st.spinner("同步引用数并优化排序..."):                
-            # 1. 获取引用数 (这是免费接口，不消耗 DS 额度)
-            id2c = smart_fetch_citations(st.session_state.search_results, ss_key=SS_API_KEY)                
-            for item in st.session_state.search_results:
-                item["citations"] = id2c.get(item['obj'].entry_id, 0)                                
-            
-            # 2. 排序逻辑
-            if "引用量" in sort_mode:
-                st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)                                
-            
-            # --- 【修改点：删除 auto_batch_contributions 调用】 ---
-            # 这里不再调用 AI，所以检索瞬间完成，不消耗任何 Token
-            
-            st.session_state.citations_loaded = True            
-        
-        st.success(f"✅ 已找到 {len(st.session_state.search_results)} 篇论文 (耗时 {time.time()-t0:.1f}s)")            
-        # 预加载图谱（也是免费接口）
-        preload_top_graphs(st.session_state.search_results, ss_key=SS_API_KEY, top_n=3)
-        st.rerun()
+        if st.session_state.search_results:
+            t0 = time.time()
+            with st.spinner("获取引用数…"):
+                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
+                for item in st.session_state.search_results:
+                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                if "引用量" in sort_mode:
+                    st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
+                st.session_state.citations_loaded = True
+            st.success(f"✅ {len(st.session_state.search_results)} 篇完成，引用数耗时 {time.time()-t0:.1f}s")
+            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
@@ -696,21 +679,11 @@ with tab_main:
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
-        # 修改点：显示“已加载”数量
         st.markdown(
-            f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
+            f'<div class="section-divider">📋 检索结果（{len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
-
-        st.download_button(
-            label="📥 点击下载当前已加载论文 (Excel)",
-            data=convert_to_excel(st.session_state.search_results),
-            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        st.markdown("---")
-        
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
@@ -750,41 +723,7 @@ with tab_main:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
-        
-       # 这里的缩进必须与上方的 for 循环对齐
-        # 修改点：加载更多功能（自动分析前 50 篇）
-    if st.session_state.search_generator:
-        st.markdown("---")
-        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-            # 统一提示语
-            with st.spinner("正在拉取并自动分析新论文摘要..."):
-                # 从 generator 中切取下 50 篇
-                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
-                
-                if more_raw:
-                    # 1. 封装新结果
-                    new_results = [{"obj": r, "citations": None} for r in more_raw]
-                    
-                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
-                    id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
-                    for item in new_results:
-                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                    
-                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
-                    # 确保 auto_batch_contributions 已在工具函数区定义
-                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
-                    
-                    # 4. 合并到全局搜索结果中
-                    st.session_state.search_results.extend(new_results)
-                    
-                    # 5. 如果当前是引用量排序模式，则重新全局排序
-                    if "引用量" in sort_mode:
-                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    
-                    # 6. 刷新页面显示结果
-                    st.rerun()
-                else:
-                    st.info("✨ 到底啦，没有更多匹配的论文了。")
+
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
@@ -1074,4 +1013,5 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
