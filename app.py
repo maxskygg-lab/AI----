@@ -816,7 +816,7 @@ with tab_read:
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
-if send_btn and user_input.strip():
+        if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.spinner("深度检索资料并对比中..."):
@@ -1049,4 +1049,5 @@ with tab_notes:
 # 3. 提升了基础检索深度：对比模式下的 fetch_k 从 30 提升至 40，备选片段更多，减少漏检。
 # 4. 优化了 Prompt 引导：要求模型在无法找到对比方信息时如实说明，而非直接报错。
 # 5. 除上述逻辑增强外，未改动任何 UI 布局、变量名或样式代码。
+
 
