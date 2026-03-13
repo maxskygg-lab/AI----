@@ -826,7 +826,7 @@ with tab_read:
                     docs = []
                     # 核心改进：针对“对比”场景优化检索
                     if scope == "🌐 对比所有论文":
-                        # 1. 首先进行全局 MMR 检索
+                        # 1. 首先进行全局 MMR 检索（确保多样性）
                         docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
                         
                         # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
@@ -835,7 +835,7 @@ with tab_read:
                             # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
                             for paper_name in t["files"]:
                                 if paper_name not in existing_sources:
-                                    extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
+                                    extra_docs = t["db"].similarity_search(prompt, k=3, filter={"source_paper": paper_name})
                                     docs.extend(extra_docs)
                     else:
                         # 单篇论文检索
@@ -856,10 +856,11 @@ with tab_read:
                         sys_p = (                            
                             "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
                             "### 任务要求：\n"                            
-                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"                            
-                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"                            
-                            "3. 数学公式使用 $...$ 格式。\n"                            
-                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
+                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【核心差异】。\n"                            
+                            "2. 回答必须严格基于资料，引用时请标注来源（如：据《论文名》所述）。不要混淆不同论文的观点。\n"                            
+                            "3. 若两篇论文在某一方面有冲突，请重点指出。\n"
+                            "4. 数学公式使用 $...$ 格式。\n"                            
+                            f"5. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
                             f"### 检索到的资料：\n{context}\n\n"                            
                             f"### 用户问题：\n{prompt}"                        
                         )                        
@@ -873,7 +874,6 @@ with tab_read:
                         answer = fix_latex(llm.invoke(sys_p).content)                    
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                    # ... 后续逻辑保持不变 ...
                     st.session_state.pending_note = {
                         "content": answer, 
                         "question": prompt,
@@ -1030,9 +1030,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-# 说明：
-# 1. 修改了 Tab 1 (学术检索) 的检索按钮逻辑。点击“开始新检索”会初始化一个 arxiv.Search 生成器。
-# 2. 引入了 itertools.islice 来分片读取生成器，每次固定加载 50 篇。
-# 3. 结果列表底部新增了“加载更多”按钮，点击后会从生成器中续读 50 篇并追加到 st.session_state.search_results 中。
-# 4. 引用数获取逻辑已适配追加模式，确保新加载的论文也能正确显示引用数。
