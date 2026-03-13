@@ -176,28 +176,6 @@ def convert_to_excel(results):
             
     return output.getvalue()
 
-# ── 核心新增：自动批处理首屏 50 篇摘要 ──
-def auto_batch_contributions(results, api_key, limit=50):
-    """默认自动处理前50篇的摘要生成"""
-    to_process = results[:limit]
-    # 过滤掉缓存中已有的，避免重复请求
-    pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.contributions_cache]
-    
-    if not pending:
-        return
-    
-    # 使用多线程并行调用接口，显著缩短等待时间
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {
-            pool.submit(get_one_line_contribution, p['obj'].summary, p['obj'].title, api_key): p 
-            for p in pending
-        }
-        for future in as_completed(futures):
-            try:
-                future.result() # 内部已写入 session_state.contributions_cache
-            except:
-                pass
-
 # ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
 def fetch_citations_batch_cached(arxiv_ids_tuple: tuple, ss_key=None) -> dict:
@@ -1014,6 +992,7 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
+
 
 
 
