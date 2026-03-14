@@ -102,7 +102,7 @@ SS_API_KEY   = st.secrets["SS_API_KEY"]
 # ================= 3. 状态初始化 =================
 defaults = {
     "search_results":         [],
-    "search_generator":       None,  # 用于保存无上限搜索的生成器
+    "search_generator":       None,
     "citations_loaded":       False,
     "citations_global_cache": {},
     "suggested_query":        "",
@@ -116,14 +116,97 @@ defaults = {
     "pending_note":           None,
     "graph_references_cache": [],
     "preload_done_ids":       set(),
-    "trackers":               {},   # { kw: {check_interval_h, last_checked, seen_ids, new_papers} }
+    "trackers":               {},
     "tracker_total_new":      0,
+    "show_sources":           True,
+    "compact_mode":           False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ================= 4. 工具函数 =================
+
+def build_llm(api_key, temperature=0.1, max_tokens=None):
+    kwargs = {
+        "model": "deepseek-chat",
+        "api_key": api_key,
+        "base_url": "https://api.deepseek.com",
+        "temperature": temperature,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    return ChatOpenAI(**kwargs)
+
+
+def safe_retrieve_docs(db, query: str, scope: str, topic_files: list, k: int = 10, fetch_k: int = 80, per_paper_min: int = 3):
+    """
+    更稳的检索：
+    - 单篇论文：先召回，再手动按 source_paper 过滤
+    - 对比所有论文：按论文分桶，尽量保证每篇论文至少拿到 per_paper_min 个片段
+    """
+    if db is None:
+        return []
+
+    try:
+        pairs = db.similarity_search_with_score(query, k=fetch_k)
+    except Exception:
+        docs = db.similarity_search(query, k=fetch_k)
+        pairs = [(d, 0.0) for d in docs]
+
+    # 过滤低信息块，减少 References/目录污染
+    low_info_keywords = [
+        "references", "bibliography", "acknowledg", "table of contents",
+        "contents", "appendix", "附录", "参考文献", "致谢", "目录"
+    ]
+    filtered_pairs = []
+    for d, s in pairs:
+        head = (d.page_content or "")[:500].lower()
+        if not any(w in head for w in low_info_keywords):
+            filtered_pairs.append((d, s))
+    pairs = filtered_pairs if filtered_pairs else pairs
+
+    # 单篇论文
+    if scope != "🌐 对比所有论文":
+        pairs = [(d, s) for d, s in pairs if d.metadata.get("source_paper") == scope]
+        pairs.sort(key=lambda x: x[1])
+        return [d for d, _ in pairs[:k]]
+
+    # 多篇对比：按论文分桶
+    buckets = {p: [] for p in topic_files}
+    for d, s in pairs:
+        src = d.metadata.get("source_paper")
+        if src in buckets:
+            buckets[src].append((d, s))
+
+    for p in buckets:
+        buckets[p].sort(key=lambda x: x[1])
+
+    out = []
+    used = set()
+
+    # 第一轮：每篇保底
+    for p in topic_files:
+        for d, s in buckets.get(p, [])[:per_paper_min]:
+            sig = (d.metadata.get("source_paper"), d.metadata.get("page"), d.page_content[:120])
+            if sig not in used:
+                out.append(d)
+                used.add(sig)
+            if len(out) >= k:
+                return out
+
+    # 第二轮：全局补齐
+    pairs.sort(key=lambda x: x[1])
+    for d, s in pairs:
+        sig = (d.metadata.get("source_paper"), d.metadata.get("page"), d.page_content[:120])
+        if sig in used:
+            continue
+        out.append(d)
+        used.add(sig)
+        if len(out) >= k:
+            break
+
+    return out
 
 def active_topic_data():
     return st.session_state.topics[st.session_state.active_topic]
@@ -275,13 +358,7 @@ def get_one_line_contribution(abstract, title, api_key):
         return st.session_state.contributions_cache[key]
     try:
         # 修改点：切换为 ChatOpenAI 适配器并指向 DeepSeek 服务器
-        llm = ChatOpenAI(
-            model='deepseek-chat', 
-            openai_api_key=api_key, 
-            openai_api_base='https://api.deepseek.com', 
-            max_tokens=100, 
-            temperature=0.0
-        )
+        llm = build_llm(api_key, temperature=0.0, max_tokens=100)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
             f"只输出这一句话，不要前缀或解释。\n\n标题：{title}\n摘要：{abstract[:600]}"
@@ -740,7 +817,7 @@ with tab_main:
                         
                         st.rerun()
         else:
-            st.caption("<center>已显示所有搜索到的结果</center>", unsafe_allow_html=True)
+            st.markdown("<center>已显示所有搜索到的结果</center>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════
 # Tab 2：研读空间
@@ -816,84 +893,76 @@ with tab_read:
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
-        if send_btn and user_input.strip():
+                if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
+
             with st.spinner("深度检索资料并对比中..."):
                 try:
-                    sk = 15 if "精读" in reading_mode else 10
                     scope = st.session_state.selected_scope
-                    
-                    docs = []
-                    
-                    # 核心改进：针对“对比”场景优化检索，彻底解决 FAISS filter 导致单篇论文掉队的问题
-                    if scope == "🌐 对比所有论文":
-                        # 1. 大基数召回：先不加任何过滤，一口气捞出最相关的 40 条片段（扩大搜索池）
-                        raw_docs = t["db"].max_marginal_relevance_search(prompt, k=40, fetch_k=60, lambda_mult=0.5)
-                        
-                        # 2. 手动均衡分配：算出每篇论文理论上应该分到几个片段（比如 15条 ÷ 2篇 = 每篇保底 7条）
-                        papers_in_topic = t["files"]
-                        target_per_paper = max(3, sk // len(papers_in_topic) if len(papers_in_topic) > 0 else sk)
-                        
-                        paper_counts = {p: 0 for p in papers_in_topic}
-                        
-                        # 第一轮：强制公平分配。遍历刚才捞出的 40 条，优先给没吃饱的论文发片段
-                        for d in raw_docs:
-                            src = d.metadata.get('source_paper')
-                            if src in paper_counts and paper_counts[src] < target_per_paper:
-                                docs.append(d)
-                                paper_counts[src] += 1
-                                
-                        # 第二轮：如果第一轮分完，总数还没达到我们的目标(sk条)，就把剩下的按相关度补齐
-                        if len(docs) < sk:
-                            for d in raw_docs:
-                                if len(docs) >= sk: 
-                                    break
-                                if d not in docs:
-                                    docs.append(d)
-                    else:
-                        # 单篇论文检索（保持原样，因为此时不需要均衡对比）
-                        fd = {"source_paper": scope}
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
+                    sk = 15 if "精读" in reading_mode else (12 if scope == "🌐 对比所有论文" else 8)
+
+                    docs = safe_retrieve_docs(
+                        db=t["db"],
+                        query=prompt,
+                        scope=scope,
+                        topic_files=t["files"],
+                        k=sk,
+                        fetch_k=100 if scope == "🌐 对比所有论文" else 40,
+                        per_paper_min=3 if scope == "🌐 对比所有论文" else 1,
+                    )
 
                     if not docs:
                         answer = "未找到相关内容，请尝试换个问法。"
                     else:
-                        # 构建上下文，强调来源标识
                         context_list = []
                         for d in docs:
-                            src = d.metadata.get('source_paper', '未知来源')
-                            pg = d.metadata.get('page', 0) + 1
-                            context_list.append(f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}")
-                        
-                        context = "\n\n---\n\n".join(context_list)                        
-                        sys_p = (                            
-                            "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"                            
-                            "### 任务要求：\n"                            
-                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"                            
-                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"                            
-                            "3. 数学公式使用 $...$ 格式。\n"                            
-                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"                            
-                            f"### 检索到的资料：\n{context}\n\n"                            
-                            f"### 用户问题：\n{prompt}"                        
-                        )                        
-                        
-                        llm = ChatOpenAI(
-                            model='deepseek-chat', 
-                            openai_api_key=DEEPSEEK_API_KEY, 
-                            openai_api_base='https://api.deepseek.com', 
-                            temperature=0.1
-                        )
-                        answer = fix_latex(llm.invoke(sys_p).content)                    
-                    
+                            src = d.metadata.get("source_paper", "未知来源")
+                            pg = d.metadata.get("page", 0) + 1
+                            context_list.append(
+                                f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}"
+                            )
+                        context = "\n\n---\n\n".join(context_list)
+
+                        if scope == "🌐 对比所有论文":
+                            sys_p = (
+                                "你是一位资深科研对比助手。请严格基于提供的资料回答。\n\n"
+                                "要求：\n"
+                                "1. 先给出一句话总结。\n"
+                                "2. 若用户要求对比，请优先输出 Markdown 表格。\n"
+                                "3. 表格至少包含：论文、核心方法/假设、关键贡献、局限/适用条件、与问题相关性。\n"
+                                "4. 每条结论尽量标注来源，如（论文名，第3页）。\n"
+                                "5. 不得编造资料中没有的信息。\n"
+                                "6. 如果某篇论文资料明显不足，要明确写【该论文资料不足】而不是笼统说无法回答。\n"
+                                "7. 数学公式使用 $...$。\n\n"
+                                f"### 检索到的资料：\n{context}\n\n"
+                                f"### 用户问题：\n{prompt}"
+                            )
+                        else:
+                            sys_p = (
+                                "你是一位资深科研助理。请严格基于提供的论文资料回答问题。\n\n"
+                                "要求：\n"
+                                "1. 回答必须基于资料。\n"
+                                "2. 关键结论尽量标注来源（论文名，第几页）。\n"
+                                "3. 不得编造。\n"
+                                "4. 数学公式使用 $...$。\n"
+                                "5. 如果资料中没有提到相关信息，请明确回答【资料不足】。\n\n"
+                                f"### 检索到的资料：\n{context}\n\n"
+                                f"### 用户问题：\n{prompt}"
+                            )
+
+                        llm = build_llm(DEEPSEEK_API_KEY, temperature=0.1)
+                        answer = fix_latex(llm.invoke(sys_p).content)
+
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
                     st.session_state.pending_note = {
-                        "content": answer, 
+                        "content": answer,
                         "question": prompt,
                         "has_gap": detect_knowledge_gap(answer, docs if docs else [])
                     }
                     st.rerun()
-                except Exception as e: 
+
+                except Exception as e:
                     st.error(f"生成出错: {e}")
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
