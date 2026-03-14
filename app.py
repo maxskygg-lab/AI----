@@ -886,16 +886,21 @@ with tab_read:
         st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
 
         # 输入框
+                # 输入框
         ci1, ci2 = st.columns([6, 1])
         with ci1:
-            user_input = st.text_input("提问", placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
-                                       label_visibility="collapsed", key="chat_input_box")
+            user_input = st.text_input(
+                "提问",
+                placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
+                label_visibility="collapsed",
+                key="chat_input_box"
+            )
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
-            if send_btn and user_input.strip():
-                prompt = user_input.strip()
-                st.session_state.chat_history.append({"role": "user", "content": prompt})
+        if send_btn and user_input.strip():
+            prompt = user_input.strip()
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
 
             with st.spinner("深度检索资料并对比中..."):
                 try:
@@ -1111,12 +1116,3 @@ with tab_notes:
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
             st.session_state.notes = []; st.rerun()
-
-# 修改说明：
-# 1. 精准修改了 `tab_read` 下的 `if send_btn and user_input.strip():` 逻辑。
-# 2. 引入了“强制平衡检索”机制：在对比模式下，循环检查入库论文，确保每一篇论文至少有 5 个相关片段进入上下文。
-# 3. 提升了基础检索深度：对比模式下的 fetch_k 从 30 提升至 40，备选片段更多，减少漏检。
-# 4. 优化了 Prompt 引导：要求模型在无法找到对比方信息时如实说明，而非直接报错。
-# 5. 除上述逻辑增强外，未改动任何 UI 布局、变量名或样式代码。
-
-
