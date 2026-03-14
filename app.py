@@ -8,16 +8,14 @@ from streamlit_agraph import agraph, Node, Edge, Config
 
 # ================= 1. 环境检查 =================
 try:
-    import langchain_community, fitz, sentence_transformers
+    import zhipuai, langchain_community, fitz
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}。请运行: pip install langchain-openai sentence-transformers"); st.stop()
+    st.error(f"🚑 环境缺失库 -> {e.name}"); st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-# 关键替换：使用 OpenAI 协议来调用 DeepSeek
-from langchain_openai import ChatOpenAI
-# 关键替换：使用本地模型进行 Embedding（完全免费）
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_community.embeddings import ZhipuAIEmbeddings
+from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
@@ -95,14 +93,13 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 v5")
 
 # ================= API Key =================
-DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-USER_API_KEY = DEEPSEEK_API_KEY
+USER_API_KEY = st.secrets["ZHIPU_API_KEY"]
 SS_API_KEY   = st.secrets["SS_API_KEY"]
 
 # ================= 3. 状态初始化 =================
 defaults = {
     "search_results":         [],
-    "search_generator":       None,
+    "search_generator":       None,  # 新增：用于保存无上限搜索的生成器
     "citations_loaded":       False,
     "citations_global_cache": {},
     "suggested_query":        "",
@@ -116,97 +113,14 @@ defaults = {
     "pending_note":           None,
     "graph_references_cache": [],
     "preload_done_ids":       set(),
-    "trackers":               {},
+    "trackers":               {},   # { kw: {check_interval_h, last_checked, seen_ids, new_papers} }
     "tracker_total_new":      0,
-    "show_sources":           True,
-    "compact_mode":           False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ================= 4. 工具函数 =================
-
-def build_llm(api_key, temperature=0.1, max_tokens=None):
-    kwargs = {
-        "model": "deepseek-chat",
-        "api_key": api_key,
-        "base_url": "https://api.deepseek.com",
-        "temperature": temperature,
-    }
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    return ChatOpenAI(**kwargs)
-
-
-def safe_retrieve_docs(db, query: str, scope: str, topic_files: list, k: int = 10, fetch_k: int = 80, per_paper_min: int = 3):
-    """
-    更稳的检索：
-    - 单篇论文：先召回，再手动按 source_paper 过滤
-    - 对比所有论文：按论文分桶，尽量保证每篇论文至少拿到 per_paper_min 个片段
-    """
-    if db is None:
-        return []
-
-    try:
-        pairs = db.similarity_search_with_score(query, k=fetch_k)
-    except Exception:
-        docs = db.similarity_search(query, k=fetch_k)
-        pairs = [(d, 0.0) for d in docs]
-
-    # 过滤低信息块，减少 References/目录污染
-    low_info_keywords = [
-        "references", "bibliography", "acknowledg", "table of contents",
-        "contents", "appendix", "附录", "参考文献", "致谢", "目录"
-    ]
-    filtered_pairs = []
-    for d, s in pairs:
-        head = (d.page_content or "")[:500].lower()
-        if not any(w in head for w in low_info_keywords):
-            filtered_pairs.append((d, s))
-    pairs = filtered_pairs if filtered_pairs else pairs
-
-    # 单篇论文
-    if scope != "🌐 对比所有论文":
-        pairs = [(d, s) for d, s in pairs if d.metadata.get("source_paper") == scope]
-        pairs.sort(key=lambda x: x[1])
-        return [d for d, _ in pairs[:k]]
-
-    # 多篇对比：按论文分桶
-    buckets = {p: [] for p in topic_files}
-    for d, s in pairs:
-        src = d.metadata.get("source_paper")
-        if src in buckets:
-            buckets[src].append((d, s))
-
-    for p in buckets:
-        buckets[p].sort(key=lambda x: x[1])
-
-    out = []
-    used = set()
-
-    # 第一轮：每篇保底
-    for p in topic_files:
-        for d, s in buckets.get(p, [])[:per_paper_min]:
-            sig = (d.metadata.get("source_paper"), d.metadata.get("page"), d.page_content[:120])
-            if sig not in used:
-                out.append(d)
-                used.add(sig)
-            if len(out) >= k:
-                return out
-
-    # 第二轮：全局补齐
-    pairs.sort(key=lambda x: x[1])
-    for d, s in pairs:
-        sig = (d.metadata.get("source_paper"), d.metadata.get("page"), d.page_content[:120])
-        if sig in used:
-            continue
-        out.append(d)
-        used.add(sig)
-        if len(out) >= k:
-            break
-
-    return out
 
 def active_topic_data():
     return st.session_state.topics[st.session_state.active_topic]
@@ -258,6 +172,28 @@ def convert_to_excel(results):
             worksheet.write(0, col_num, value, header_fmt)
             
     return output.getvalue()
+
+# ── 核心新增：自动批处理首屏 50 篇摘要 ──
+def auto_batch_contributions(results, api_key, limit=50):
+    """默认自动处理前50篇的摘要生成"""
+    to_process = results[:limit]
+    # 过滤掉缓存中已有的，避免重复请求
+    pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.contributions_cache]
+    
+    if not pending:
+        return
+    
+    # 使用多线程并行调用接口，显著缩短等待时间
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {
+            pool.submit(get_one_line_contribution, p['obj'].summary, p['obj'].title, api_key): p 
+            for p in pending
+        }
+        for future in as_completed(futures):
+            try:
+                future.result() # 内部已写入 session_state.contributions_cache
+            except:
+                pass
 
 # ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
@@ -330,7 +266,7 @@ def preload_top_graphs(results, ss_key=None, top_n=3):
         done.add(item['obj'].entry_id)
         time.sleep(0.3)
     ph.caption("✅ 图谱预加载完成")
-    
+
 @st.cache_data(ttl=3600)
 def fetch_graph_data(arxiv_id, ss_key=None):
     clean_id = get_pure_arxiv_id(arxiv_id)
@@ -357,8 +293,7 @@ def get_one_line_contribution(abstract, title, api_key):
     if key in st.session_state.contributions_cache:
         return st.session_state.contributions_cache[key]
     try:
-        # 修改点：切换为 ChatOpenAI 适配器并指向 DeepSeek 服务器
-        llm = build_llm(api_key, temperature=0.0, max_tokens=100)
+        llm = ChatZhipuAI(model="glm-4-flash", api_key=api_key, temperature=0.0)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
             f"只输出这一句话，不要前缀或解释。\n\n标题：{title}\n摘要：{abstract[:600]}"
@@ -372,67 +307,58 @@ def fix_latex(text):
     if not text: return text
     return text.replace(r"\(","$").replace(r"\)","$").replace(r"\[","$$").replace(r"\]","$$")
 
-# 1. 新增这个缓存函数，防止重复加载模型浪费内存
-@st.cache_resource
-def load_local_embeddings():
-    # 使用 BAAI/bge-small-zh-v1.5，完全免费且本地运行，非常适合中文论文
-    model_name = "BAAI/bge-small-zh-v1.5"
-    return HuggingFaceBgeEmbeddings(model_name=model_name, encode_kwargs={'normalize_embeddings': True})
-
 def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
     topic_name = topic_name or st.session_state.active_topic
-    t = st.session_state.topics[topic_name]    
+    t = st.session_state.topics[topic_name]
     try:
         loader = PyPDFLoader(file_path)
-        docs = loader.load()        
+        docs = loader.load()
         for doc in docs:
             doc.metadata['source_paper'] = file_name
             doc.metadata['topic'] = topic_name
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=600, chunk_overlap=200,
-            separators=["\n\n","\n","。","."," ",""]        
+            separators=["\n\n","\n","。","."," ",""]
         )
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
-        
-        # --- 关键修改：改用本地模型，不再消耗 api_key ---
-        embeddings = load_local_embeddings()
-        
-        batch = 20 # 本地模型速度快，批次可以大一点
+        embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+        batch = 10
         if t["db"] is None:
-            t["db"] = FAISS.from_documents(chunks[:batch], embeddings)            
+            t["db"] = FAISS.from_documents(chunks[:batch], embeddings)
             for i in range(batch, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch])
-        else:            
+                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
+        else:
             for i in range(0, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch])
-        
+                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
         if file_name not in t["files"]:
             t["files"].append(file_name)
-        st.session_state.chat_history.append({            
-            "role": "system_notice",            
-            "content": f"📚 《{file_name}》已加入主题「{topic_name}」。"        
-        })        
-        return True    
+        st.session_state.chat_history.append({
+            "role": "system_notice",
+            "content": f"📚 《{file_name}》已加入主题「{topic_name}」。"
+        })
+        return True
     except Exception as e:
         st.error(f"处理失败: {e}"); return False
 
 def rebuild_topic_index(topic_name, api_key):
-    t = st.session_state.topics[topic_name]    
+    t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
-    
-    # --- 关键修改：同样改用本地模型 ---
-    embeddings = load_local_embeddings()
+    embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
     t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
-# 接上一部分
-
-def detect_knowledge_gap(answer, docs):
-    # 此处逻辑在原代码中未给出具体实现，保留占位，不影响主干修改
+def detect_knowledge_gap(answer_text, docs):
+    sigs = ["资料不足","没有找到","无法回答","未提及","不清楚","没有相关","cannot find","not mentioned"]
+    if len(docs) < 3: return True
+    for s in sigs:
+        if s.lower() in answer_text.lower(): return True
     return False
 
 def get_gap_recommendations():
-    return st.session_state.get("graph_references_cache", [])
+    loaded = set()
+    for t in st.session_state.topics.values(): loaded.update(t["files"])
+    return [r for r in st.session_state.graph_references_cache
+            if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
 # ── 关键词追踪 ──
 def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
@@ -621,51 +547,60 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
-#Tab 1：学术检索 & 图谱
+# Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
-    sq1,sq2,sq3 = st.columns([3,1.5,1])
+    
+    # 修改点：移除了原本控制数量的组件，改为只占两列
+    sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
-    with sq3:
-        # 修改点：将原有的数量选择器移除或作为“单次加载步长”
-        load_batch = 50 # 默认每次加载50篇
 
-    if st.button("🚀 开始新检索", use_container_width=True) and search_query:
-        with st.spinner("开启无上限检索流..."):
+    if st.button("🚀 检索", use_container_width=True) and search_query:
+        with st.spinner("检索论文中..."):
             try:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
                 
-                # 修改点：初始化生成器，而不是直接拉取全部结果
-                st.session_state.search_generator = arxiv.Search(query=refined, sort_by=asort).results()
-                st.session_state.search_results = [] # 清空旧结果
+                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
+                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                st.session_state.search_generator = raw_gen
+                raw = list(itertools.islice(raw_gen, 50))
+                
+                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
                 st.session_state.focus_paper_id = None
-                
-                # 预先拉取第一批 50 篇
-                new_raw = list(itertools.islice(st.session_state.search_generator, load_batch))
-                st.session_state.search_results = [{"obj":r,"citations":None} for r in new_raw]
-                
-                # 获取第一批的引用数
+            except Exception as e: st.error(f"检索失败: {e}")
+
+        if st.session_state.search_results:
+            t0 = time.time()
+            # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
+            with st.spinner("同步引用数并自动分析前50篇摘要..."):
+                # 1. 获取引用数
                 id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
                 for item in st.session_state.search_results:
                     item["citations"] = id2c.get(item['obj'].entry_id, 0)
                 
+                # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
-                    st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
+                    st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
                 
-                preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
-            except Exception as e: st.error(f"检索失败: {e}")
+                # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
+                # 确保 USER_API_KEY 已在 secrets 或上方定义
+                auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
+                
+                st.session_state.citations_loaded = True
+            
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，自动分析耗时 {time.time()-t0:.1f}s")
+            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
@@ -748,11 +683,21 @@ with tab_main:
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
+        # 修改点：显示“已加载”数量
         st.markdown(
-            f'<div class="section-divider">📋 检索结果（当前已加载 {len(st.session_state.search_results)} 篇）'
-            f'<span class="perf-badge">⚡ 引用数缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
+            f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
+            f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
+
+        st.download_button(
+            label="📥 点击下载当前已加载论文 (Excel)",
+            data=convert_to_excel(st.session_state.search_results),
+            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.markdown("---")
+        
         for i, item in enumerate(st.session_state.search_results):
             res   = item['obj']
             cites = item['citations']
@@ -792,33 +737,41 @@ with tab_main:
                     lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
-
-        # 修改点：底部新增“加载更多”按钮
+        
+       # 这里的缩进必须与上方的 for 循环对齐
+        # 修改点：加载更多功能（自动分析前 50 篇）
+    if st.session_state.search_generator:
         st.markdown("---")
-        if st.session_state.search_generator:
-            if st.button("⬇️ 加载更多 (Next 50)...", use_container_width=True):
-                with st.spinner("正在获取更多论文..."):
-                    more_raw = list(itertools.islice(st.session_state.search_generator, load_batch))
-                    if not more_raw:
-                        st.warning("到底了，没有更多结果了。")
-                        st.session_state.search_generator = None
-                    else:
-                        new_batch = [{"obj":r,"citations":None} for r in more_raw]
-                        # 批量获取新结果的引用数
-                        id2c = smart_fetch_citations(new_batch, ss_key=ss_api_key)
-                        for item in new_batch:
-                            item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                        
-                        st.session_state.search_results.extend(new_batch)
-                        
-                        # 如果需要维持“引用量”排序，则进行全局重排
-                        if "引用量" in sort_mode:
-                            st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
-                        
-                        st.rerun()
-        else:
-            st.markdown("<center>已显示所有搜索到的结果</center>", unsafe_allow_html=True)
-
+        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+            # 统一提示语
+            with st.spinner("正在拉取并自动分析新论文摘要..."):
+                # 从 generator 中切取下 50 篇
+                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                
+                if more_raw:
+                    # 1. 封装新结果
+                    new_results = [{"obj": r, "citations": None} for r in more_raw]
+                    
+                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
+                    id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
+                    for item in new_results:
+                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                    
+                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
+                    # 确保 auto_batch_contributions 已在工具函数区定义
+                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
+                    
+                    # 4. 合并到全局搜索结果中
+                    st.session_state.search_results.extend(new_results)
+                    
+                    # 5. 如果当前是引用量排序模式，则重新全局排序
+                    if "引用量" in sort_mode:
+                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    
+                    # 6. 刷新页面显示结果
+                    st.rerun()
+                else:
+                    st.info("✨ 到底啦，没有更多匹配的论文了。")
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
@@ -886,89 +839,76 @@ with tab_read:
         st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
 
         # 输入框
-                # 输入框
         ci1, ci2 = st.columns([6, 1])
         with ci1:
-            user_input = st.text_input(
-                "提问",
-                placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
-                label_visibility="collapsed",
-                key="chat_input_box"
-            )
+            user_input = st.text_input("提问", placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
+                                       label_visibility="collapsed", key="chat_input_box")
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
         if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-
             with st.spinner("深度检索资料并对比中..."):
                 try:
+                    sk = 15 if "精读" in reading_mode else 10
                     scope = st.session_state.selected_scope
-                    sk = 15 if "精读" in reading_mode else (12 if scope == "🌐 对比所有论文" else 8)
-
-                    docs = safe_retrieve_docs(
-                        db=t["db"],
-                        query=prompt,
-                        scope=scope,
-                        topic_files=t["files"],
-                        k=sk,
-                        fetch_k=100 if scope == "🌐 对比所有论文" else 40,
-                        per_paper_min=3 if scope == "🌐 对比所有论文" else 1,
-                    )
+                    
+                    docs = []
+                    # 核心改进：针对“对比”场景优化检索
+                    if scope == "🌐 对比所有论文":
+                        # 1. 首先进行全局 MMR 检索
+                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
+                        
+                        # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
+                        if len(t["files"]) > 1:
+                            existing_sources = set(d.metadata.get('source_paper') for d in docs)
+                            # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
+                            for paper_name in t["files"]:
+                                if paper_name not in existing_sources:
+                                    extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
+                                    docs.extend(extra_docs)
+                    else:
+                        # 单篇论文检索
+                        fd = {"source_paper": scope}
+                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
 
                     if not docs:
                         answer = "未找到相关内容，请尝试换个问法。"
                     else:
+                        # 构建上下文，强调来源标识
                         context_list = []
                         for d in docs:
-                            src = d.metadata.get("source_paper", "未知来源")
-                            pg = d.metadata.get("page", 0) + 1
-                            context_list.append(
-                                f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}"
-                            )
+                            src = d.metadata.get('source_paper', '未知来源')
+                            pg = d.metadata.get('page', 0) + 1
+                            context_list.append(f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}")
+                        
                         context = "\n\n---\n\n".join(context_list)
-
-                        if scope == "🌐 对比所有论文":
-                            sys_p = (
-                                "你是一位资深科研对比助手。请严格基于提供的资料回答。\n\n"
-                                "要求：\n"
-                                "1. 先给出一句话总结。\n"
-                                "2. 若用户要求对比，请优先输出 Markdown 表格。\n"
-                                "3. 表格至少包含：论文、核心方法/假设、关键贡献、局限/适用条件、与问题相关性。\n"
-                                "4. 每条结论尽量标注来源，如（论文名，第3页）。\n"
-                                "5. 不得编造资料中没有的信息。\n"
-                                "6. 如果某篇论文资料明显不足，要明确写【该论文资料不足】而不是笼统说无法回答。\n"
-                                "7. 数学公式使用 $...$。\n\n"
-                                f"### 检索到的资料：\n{context}\n\n"
-                                f"### 用户问题：\n{prompt}"
-                            )
-                        else:
-                            sys_p = (
-                                "你是一位资深科研助理。请严格基于提供的论文资料回答问题。\n\n"
-                                "要求：\n"
-                                "1. 回答必须基于资料。\n"
-                                "2. 关键结论尽量标注来源（论文名，第几页）。\n"
-                                "3. 不得编造。\n"
-                                "4. 数学公式使用 $...$。\n"
-                                "5. 如果资料中没有提到相关信息，请明确回答【资料不足】。\n\n"
-                                f"### 检索到的资料：\n{context}\n\n"
-                                f"### 用户问题：\n{prompt}"
-                            )
-
-                        llm = build_llm(DEEPSEEK_API_KEY, temperature=0.1)
+                        
+                        sys_p = (
+                            "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"
+                            "### 任务要求：\n"
+                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"
+                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"
+                            "3. 数学公式使用 $...$ 格式。\n"
+                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"
+                            f"### 检索到的资料：\n{context}\n\n"
+                            f"### 用户问题：\n{prompt}"
+                        )
+                        
+                        llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
                         answer = fix_latex(llm.invoke(sys_p).content)
-
+                    
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
                     st.session_state.pending_note = {
-                        "content": answer,
+                        "content": answer, 
                         "question": prompt,
                         "has_gap": detect_knowledge_gap(answer, docs if docs else [])
                     }
                     st.rerun()
-
-                except Exception as e:
+                except Exception as e: 
                     st.error(f"生成出错: {e}")
+
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
 # ══════════════════════════════════════════
