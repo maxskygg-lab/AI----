@@ -894,8 +894,8 @@ with tab_read:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
             if send_btn and user_input.strip():
-            prompt = user_input.strip()
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
+                prompt = user_input.strip()
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
 
             with st.spinner("深度检索资料并对比中..."):
                 try:
