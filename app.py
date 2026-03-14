@@ -893,7 +893,7 @@ with tab_read:
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
-                if send_btn and user_input.strip():
+            if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
 
