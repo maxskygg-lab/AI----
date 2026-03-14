@@ -693,51 +693,47 @@ LOAD_BATCH = 50
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
-    sq1, sq2 = st.columns([3, 1.5])
+    sq1,sq2,sq3 = st.columns([3,1.5,1])
     with sq1:
-        search_query = st.text_input(
-            "关键词", value=st.session_state.suggested_query,
-            placeholder="例如: education robot", label_visibility="collapsed",
-        )
+        search_query = st.text_input("关键词", value=st.session_state.suggested_query,
+                                     placeholder="例如: education robot", label_visibility="collapsed")
     with sq2:
-        sort_mode = st.selectbox("排序", ["🔥 相关性", "📅 最新", "📈 引用量"], label_visibility="collapsed")
+        sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
+    with sq3:
+        # 修改点：将原有的数量选择器移除或作为“单次加载步长”
+        load_batch = 50 # 默认每次加载50篇
 
     if st.button("🚀 开始新检索", use_container_width=True) and search_query:
-        with st.spinner("开启检索..."):
+        with st.spinner("开启无上限检索流..."):
             try:
                 asort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode:
-                    asort = arxiv.SortCriterion.SubmittedDate
-
+                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
                     refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-
-                # 修复：不存 generator，改存查询参数用于分页
-                st.session_state.search_query_info = {
-                    "query": refined, "sort_by": asort, "offset": 0,
-                }
-                st.session_state.search_results = []
+                
+                # 修改点：初始化生成器，而不是直接拉取全部结果
+                st.session_state.search_generator = arxiv.Search(query=refined, sort_by=asort).results()
+                st.session_state.search_results = [] # 清空旧结果
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
                 st.session_state.focus_paper_id = None
-
-                new_raw = arxiv_results(arxiv.Search(
-                    query=refined, sort_by=asort, max_results=LOAD_BATCH,
-                ))
-                st.session_state.search_query_info["offset"] = len(new_raw)
-                st.session_state.search_results = [{"obj": r, "citations": None} for r in new_raw]
-
-                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=SS_API_KEY)
+                
+                # 预先拉取第一批 50 篇
+                new_raw = list(itertools.islice(st.session_state.search_generator, load_batch))
+                st.session_state.search_results = [{"obj":r,"citations":None} for r in new_raw]
+                
+                # 获取第一批的引用数
+                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
                 for item in st.session_state.search_results:
                     item["citations"] = id2c.get(item['obj'].entry_id, 0)
-
+                
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"], reverse=True)
-
-                preload_top_graphs(st.session_state.search_results, ss_key=SS_API_KEY, top_n=3)
-            except Exception as e:
-                st.error(f"检索失败: {e}")
+                
+                preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+            except Exception as e: st.error(f"检索失败: {e}")
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
