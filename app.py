@@ -1,25 +1,27 @@
 import streamlit as st
 import pandas as pd
-import os, time, tempfile, re, math, uuid, itertools,io
+import os, time, tempfile, re, math, uuid, itertools, io
 import arxiv, requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_agraph import agraph, Node, Edge, Config
 
-# ================= 1. 环境检查 =================
+# ================= 1. 环境检查与导入 =================
 try:
-    import zhipuai, langchain_community, fitz
+    import langchain_community, fitz
+    # --- 修改点：引入 OpenAI 接口适配 DeepSeek 和 HuggingFace 免费向量 ---
+    from langchain_openai import ChatOpenAI
+    from langchain_community.embeddings import HuggingFaceEmbeddings
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}"); st.stop()
+    st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf")
+    st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import ZhipuAIEmbeddings
-from langchain_community.chat_models import ChatZhipuAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
-st.set_page_config(page_title="AI 深度研读助手", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="AI 深度研读助手 (DeepSeek版)", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
     .stButton>button { width:100%; border-radius:8px; }
@@ -90,16 +92,21 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📖 AI 深度研读助手 v5")
+st.title("📖 AI 深度研读助手 v5 (DeepSeek Kernel)")
 
 # ================= API Key =================
-USER_API_KEY = st.secrets["ZHIPU_API_KEY"]
-SS_API_KEY   = st.secrets["SS_API_KEY"]
+# --- 修改点：适配 DeepSeek Key ---
+try:
+    USER_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+except:
+    USER_API_KEY = "" # 避免报错，可在侧边栏提示用户
+
+SS_API_KEY = st.secrets.get("SS_API_KEY", "")
 
 # ================= 3. 状态初始化 =================
 defaults = {
     "search_results":         [],
-    "search_generator":       None,  # 新增：用于保存无上限搜索的生成器
+    "search_generator":       None,
     "citations_loaded":       False,
     "citations_global_cache": {},
     "suggested_query":        "",
@@ -113,7 +120,7 @@ defaults = {
     "pending_note":           None,
     "graph_references_cache": [],
     "preload_done_ids":       set(),
-    "trackers":               {},   # { kw: {check_interval_h, last_checked, seen_ids, new_papers} }
+    "trackers":               {},
     "tracker_total_new":      0,
 }
 for k, v in defaults.items():
@@ -121,6 +128,22 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # ================= 4. 工具函数 =================
+
+# --- 新增：DeepSeek 模型获取函数 ---
+def get_deepseek_llm(api_key, temperature=0.1):
+    if not api_key:
+        st.error("请先配置 DEEPSEEK_API_KEY"); st.stop()
+    return ChatOpenAI(
+        model="deepseek-chat",
+        openai_api_key=api_key,
+        openai_api_base="https://api.deepseek.com",
+        temperature=temperature
+    )
+
+# --- 新增：免费 Embeddings 模型获取函数（带缓存） ---
+@st.cache_resource
+def get_embeddings_model():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 def active_topic_data():
     return st.session_state.topics[st.session_state.active_topic]
@@ -130,11 +153,9 @@ def get_pure_arxiv_id(url_or_id):
     return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
 
 def convert_to_excel(results):
-    """优化排版：支持自动换行、固定列宽、AI贡献集成"""
     data = []
     for item in results:
         res = item['obj']
-        # 从缓存中获取AI生成的核心贡献，若无则显示“未生成”
         contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
         data.append({
             "标题": res.title,
@@ -154,36 +175,29 @@ def convert_to_excel(results):
         workbook  = writer.book
         worksheet = writer.sheets['检索结果']
         
-        # 定义排版格式
         header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        cell_fmt   = workbook.add_format({'border': 1, 'valign': 'top', 'text_wrap': True}) # 自动换行
+        cell_fmt   = workbook.add_format({'border': 1, 'valign': 'top', 'text_wrap': True})
         num_fmt    = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
         
-        # 设置列宽
-        worksheet.set_column('A:A', 40, cell_fmt)   # 标题
-        worksheet.set_column('B:B', 20, cell_fmt)   # 作者
-        worksheet.set_column('C:D', 10, num_fmt)    # 年份/引用
-        worksheet.set_column('E:E', 50, cell_fmt)   # 核心贡献
-        worksheet.set_column('F:F', 30, cell_fmt)   # 链接
-        worksheet.set_column('G:G', 60, cell_fmt)   # 摘要
+        worksheet.set_column('A:A', 40, cell_fmt)
+        worksheet.set_column('B:B', 20, cell_fmt)
+        worksheet.set_column('C:D', 10, num_fmt)
+        worksheet.set_column('E:E', 50, cell_fmt)
+        worksheet.set_column('F:F', 30, cell_fmt)
+        worksheet.set_column('G:G', 60, cell_fmt)
         
-        # 写入带样式的表头
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_fmt)
             
     return output.getvalue()
 
-# ── 核心新增：自动批处理首屏 50 篇摘要 ──
 def auto_batch_contributions(results, api_key, limit=50):
-    """默认自动处理前50篇的摘要生成"""
     to_process = results[:limit]
-    # 过滤掉缓存中已有的，避免重复请求
     pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.contributions_cache]
     
     if not pending:
         return
     
-    # 使用多线程并行调用接口，显著缩短等待时间
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
             pool.submit(get_one_line_contribution, p['obj'].summary, p['obj'].title, api_key): p 
@@ -191,11 +205,10 @@ def auto_batch_contributions(results, api_key, limit=50):
         }
         for future in as_completed(futures):
             try:
-                future.result() # 内部已写入 session_state.contributions_cache
+                future.result()
             except:
                 pass
 
-# ── 引用数批量 API ──
 @st.cache_data(ttl=1800)
 def fetch_citations_batch_cached(arxiv_ids_tuple: tuple, ss_key=None) -> dict:
     clean_ids = [f"ArXiv:{get_pure_arxiv_id(aid)}" for aid in arxiv_ids_tuple]
@@ -253,7 +266,6 @@ def smart_fetch_citations(results, ss_key=None):
     return {item['obj'].entry_id: cache.get(get_pure_arxiv_id(item['obj'].entry_id), 0)
             for item in results}
 
-# ── 图谱 ──
 def preload_top_graphs(results, ss_key=None, top_n=3):
     done = st.session_state.preload_done_ids
     to_do = [item for item in sorted(results, key=lambda x: x.get("citations") or 0, reverse=True)[:top_n]
@@ -293,13 +305,15 @@ def get_one_line_contribution(abstract, title, api_key):
     if key in st.session_state.contributions_cache:
         return st.session_state.contributions_cache[key]
     try:
-        llm = ChatZhipuAI(model="glm-4-flash", api_key=api_key, temperature=0.0)
+        # --- 修改点：调用 DeepSeek ---
+        llm = get_deepseek_llm(api_key, temperature=0.0)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
             f"只输出这一句话，不要前缀或解释。\n\n标题：{title}\n摘要：{abstract[:600]}"
         )
         result = res.content.strip()
-    except: result = "（生成失败）"
+    except Exception as e: 
+        result = "（生成失败）"
     st.session_state.contributions_cache[key] = result
     return result
 
@@ -322,7 +336,10 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         )
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
-        embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+        
+        # --- 修改点：使用 HuggingFace 免费向量 ---
+        embeddings = get_embeddings_model()
+        
         batch = 10
         if t["db"] is None:
             t["db"] = FAISS.from_documents(chunks[:batch], embeddings)
@@ -344,7 +361,9 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
 def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
-    embeddings = ZhipuAIEmbeddings(model="embedding-2", api_key=api_key)
+    
+    # --- 修改点：使用 HuggingFace 免费向量 ---
+    embeddings = get_embeddings_model()
     t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
 def detect_knowledge_gap(answer_text, docs):
@@ -413,7 +432,6 @@ def tracker_mark_read(keyword: str):
         len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
     )
 
-# 启动时自动静默检查
 if st.session_state.trackers:
     tracker_run_all(force=False)
 
@@ -841,42 +859,34 @@ with tab_read:
         # 输入框
         ci1, ci2 = st.columns([6, 1])
         with ci1:
-            user_input = st.text_input("提问", placeholder="输入问题（如：对比 A 论文和 B 论文的方法论差异）...",
-                                       label_visibility="collapsed", key="chat_input_box")
+            user_input = st.text_input("提问", placeholder="输入问题...", label_visibility="collapsed", key="chat_input_box")
         with ci2:
             send_btn = st.button("发送 ➤", use_container_width=True)
 
         if send_btn and user_input.strip():
             prompt = user_input.strip()
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.spinner("深度检索资料并对比中..."):
+            with st.spinner("深度检索资料并对比中 (DeepSeek)..."):
                 try:
                     sk = 15 if "精读" in reading_mode else 10
                     scope = st.session_state.selected_scope
                     
                     docs = []
-                    # 核心改进：针对“对比”场景优化检索
                     if scope == "🌐 对比所有论文":
-                        # 1. 首先进行全局 MMR 检索
                         docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
-                        
-                        # 2. 增强逻辑：如果论文数量 > 1，且用户提问包含对比倾向，则确保每篇论文都有内容被检出
                         if len(t["files"]) > 1:
                             existing_sources = set(d.metadata.get('source_paper') for d in docs)
-                            # 如果有论文在检索中“掉队”了，为掉队的论文补齐最相关的片段
                             for paper_name in t["files"]:
                                 if paper_name not in existing_sources:
                                     extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
                                     docs.extend(extra_docs)
                     else:
-                        # 单篇论文检索
                         fd = {"source_paper": scope}
                         docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
 
                     if not docs:
                         answer = "未找到相关内容，请尝试换个问法。"
                     else:
-                        # 构建上下文，强调来源标识
                         context_list = []
                         for d in docs:
                             src = d.metadata.get('source_paper', '未知来源')
@@ -896,7 +906,8 @@ with tab_read:
                             f"### 用户问题：\n{prompt}"
                         )
                         
-                        llm = ChatZhipuAI(model="glm-4", api_key=user_api_key, temperature=0.1)
+                        # 修改点：使用 DeepSeek
+                        llm = get_deepseek_llm(USER_API_KEY, temperature=0.1)
                         answer = fix_latex(llm.invoke(sys_p).content)
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
