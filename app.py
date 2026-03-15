@@ -601,7 +601,7 @@ with tab_main:
         if st.session_state.search_results:
             t0 = time.time()
             # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
-            with st.spinner("同步引用数并自动分析前50篇摘要..."):
+            with st.spinner("同步引用数..."):
                 # 1. 获取引用数
                 id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
                 for item in st.session_state.search_results:
@@ -613,11 +613,11 @@ with tab_main:
                 
                 # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
                 # 确保 USER_API_KEY 已在 secrets 或上方定义
-                auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
+                # auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
                 
                 st.session_state.citations_loaded = True
             
-            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，自动分析耗时 {time.time()-t0:.1f}s")
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，耗时 {time.time()-t0:.1f}s")
             preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
@@ -762,7 +762,7 @@ with tab_main:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
             # 统一提示语
-            with st.spinner("正在拉取并自动分析新论文摘要..."):
+            with st.spinner("正在拉取新论文摘要..."):
                 # 从 generator 中切取下 50 篇
                 more_raw = list(itertools.islice(st.session_state.search_generator, 50))
                 
@@ -777,7 +777,7 @@ with tab_main:
                     
                     # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
                     # 确保 auto_batch_contributions 已在工具函数区定义
-                    auto_batch_contributions(new_results, USER_API_KEY, limit=50)
+                    # auto_batch_contributions(new_results, USER_API_KEY, limit=50)
                     
                     # 4. 合并到全局搜索结果中
                     st.session_state.search_results.extend(new_results)
