@@ -360,8 +360,64 @@ def get_gap_recommendations():
     return [r for r in st.session_state.graph_references_cache
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
+# ── 关键词追踪 ──
+def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
+    try:
+        cutoff = datetime.fromisoformat(since_date) if since_date else datetime.now() - timedelta(days=7)
+        refined = keyword
+        if " " in keyword and "AND" not in keyword and '"' not in keyword:
+            refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in keyword.split()])
+        results = list(arxiv.Search(
+            query=refined, max_results=30,
+            sort_by=arxiv.SortCriterion.SubmittedDate
+        ).results())
+        out = []
+        for r in results:
+            if r.published.replace(tzinfo=None) > cutoff:
+                out.append({
+                    "title":     r.title,
+                    "authors":   ", ".join([a.name for a in r.authors]),
+                    "published": r.published.strftime("%Y-%m-%d"),
+                    "summary":   r.summary,
+                    "entry_id":  r.entry_id,
+                    "obj":       r,
+                })
+        return out
+    except Exception as e:
+        st.warning(f"追踪「{keyword}」时出错: {e}"); return []
 
-# ================= 4. 图谱渲染 =================
+def tracker_run_all(force=False):
+    if not st.session_state.trackers: return
+    now = datetime.now()
+    total = 0
+    for kw, data in st.session_state.trackers.items():
+        last = data.get("last_checked")
+        ih   = data.get("check_interval_h", 12)
+        if not force and last:
+            elapsed = (now - datetime.fromisoformat(last)).total_seconds() / 3600
+            if elapsed < ih:
+                total += len(data.get("new_papers",[])); continue
+        new = tracker_check_one(kw, since_date=data.get("last_checked"))
+        seen = set(data.get("seen_ids",[]))
+        truly_new = [p for p in new if p["entry_id"] not in seen]
+        data["new_papers"]   = truly_new + data.get("new_papers",[])
+        data["last_checked"] = now.isoformat(timespec="seconds")
+        total += len(data["new_papers"])
+    st.session_state.tracker_total_new = total
+
+def tracker_mark_read(keyword: str):
+    data = st.session_state.trackers.get(keyword, {})
+    for p in data.get("new_papers",[]): data.setdefault("seen_ids",[]).append(p["entry_id"])
+    data["new_papers"] = []
+    st.session_state.tracker_total_new = sum(
+        len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
+    )
+
+# 启动时自动静默检查
+if st.session_state.trackers:
+    tracker_run_all(force=False)
+
+# ================= 5. 图谱渲染 =================
 def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, details = [], [], {}
@@ -483,6 +539,9 @@ with st.sidebar:
             os.remove(path); st.rerun()
 
 # ================= 7. 主界面 =================
+_n_new = st.session_state.tracker_total_new
+_track_label = f"🔔 追踪提醒 ({_n_new} 新)" if _n_new > 0 else "🔔 关键词追踪"
+
 tab_main, tab_read, tab_track, tab_notes = st.tabs([
     "🔍 学术检索 & 图谱", "📖 研读空间", _track_label, "📌 我的笔记"
 ])
@@ -851,7 +910,113 @@ with tab_read:
                     st.error(f"生成出错: {e}")
 
 # ══════════════════════════════════════════
-# Tab 3：我的笔记
+# Tab 3：关键词追踪
+# ══════════════════════════════════════════
+with tab_track:
+    st.subheader("🔔 关键词追踪")
+    st.caption("添加关键词后，App 每次启动自动检查 arXiv，有新论文时 Tab 标题显示数量提醒。")
+
+    add1,add2,add3 = st.columns([3,1.2,1])
+    with add1:
+        new_kw = st.text_input("关键词", placeholder="例如: diffusion model",
+                               label_visibility="collapsed", key="tracker_new_kw")
+    with add2:
+        ih = st.selectbox("检查间隔",[6,12,24,72],
+                          format_func=lambda x:f"每 {x}h",
+                          label_visibility="collapsed", key="tracker_interval")
+    with add3:
+        if st.button("➕ 添加追踪", use_container_width=True) and new_kw.strip():
+            kw = new_kw.strip()
+            if kw not in st.session_state.trackers:
+                st.session_state.trackers[kw] = {
+                    "check_interval_h": ih, "last_checked": None,
+                    "seen_ids": [], "new_papers": [],
+                }
+                with st.spinner("首次检查中…"): tracker_run_all(force=True)
+                st.rerun()
+            else: st.warning("该关键词已在追踪列表中")
+
+    if st.session_state.trackers:
+        ga1,ga2 = st.columns([3,1])
+        with ga1:
+            nn = st.session_state.tracker_total_new
+            bdg = (f"<span class='tracker-new-badge'>🆕 {nn} 篇未读</span>" if nn > 0
+                   else "<span style='color:#94a3b8;font-size:.85em'>暂无未读</span>")
+            st.markdown(f"共追踪 **{len(st.session_state.trackers)}** 个关键词 · {bdg}", unsafe_allow_html=True)
+        with ga2:
+            if st.button("🔄 立即全部刷新", use_container_width=True):
+                with st.spinner("检查中…"): tracker_run_all(force=True)
+                st.rerun()
+
+    st.markdown("---")
+
+    if not st.session_state.trackers:
+        st.info("还没有追踪任何关键词，在上方添加第一个吧！")
+    else:
+        for kw, data in list(st.session_state.trackers.items()):
+            new_papers = data.get("new_papers",[])
+            last_chk   = data.get("last_checked","从未")
+            n_new      = len(new_papers)
+            badge      = (f"<span class='tracker-new-badge'>🆕 {n_new} 篇新论文</span>"
+                          if n_new > 0 else "<span style='color:#94a3b8;font-size:.8em'>暂无新论文</span>")
+
+            st.markdown('<div class="tracker-card">', unsafe_allow_html=True)
+            th1,th2,th3,th4 = st.columns([3,2,1,1])
+            with th1: st.markdown(f"**🔑 {kw}** {badge}", unsafe_allow_html=True)
+            with th2: st.caption(f"🕐 上次: {last_chk[:16] if last_chk != '从未' else '从未'}")
+            with th3:
+                if st.button("✅ 标记已读", key=f"read_{kw}", use_container_width=True, disabled=(n_new==0)):
+                    tracker_mark_read(kw); st.rerun()
+            with th4:
+                if st.button("🗑️ 删除", key=f"del_track_{kw}", use_container_width=True):
+                    del st.session_state.trackers[kw]
+                    st.session_state.tracker_total_new = sum(
+                        len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
+                    ); st.rerun()
+
+            if new_papers:
+                for paper in new_papers:
+                    # 完整标题、完整作者、完整摘要，不截断
+                    st.markdown(
+                        f"""
+                        <div class="new-paper-card">
+                            <div style="font-weight:700;color:#1e293b;font-size:.93em;
+                                        margin-bottom:6px;line-height:1.4;">
+                                📄 {paper['title']}
+                            </div>
+                            <div style="color:#64748b;font-size:.83em;margin-bottom:10px;">
+                                👤 {paper['authors']} &nbsp;·&nbsp; 📅 {paper['published']}
+                            </div>
+                            <div style="color:#475569;font-size:.85em;line-height:1.7;">
+                                {paper['summary']}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True,
+                    )
+                    pb1,pb2,pb3 = st.columns([1,1,4])
+                    with pb1: st.markdown(f"[🔗 ArXiv]({paper['entry_id']})")
+                    with pb2:
+                        if st.button("⬇️ 入库", key=f"tr_dl_{paper['entry_id']}"):
+                            with st.spinner("下载中…"):
+                                try:
+                                    obj = paper.get("obj") or next(
+                                        arxiv.Search(id_list=[get_pure_arxiv_id(paper['entry_id'])]).results()
+                                    )
+                                    pdf_path = obj.download_pdf(dirpath=tempfile.gettempdir())
+                                    process_and_add_to_topic(pdf_path, paper['title'], user_api_key)
+                                    st.success("已入库！")
+                                except Exception as e: st.error(str(e))
+                    with pb3:
+                        if st.button("🕸️ 查图谱", key=f"tr_graph_{paper['entry_id']}"):
+                            st.session_state.focus_paper_id = paper['entry_id']; st.rerun()
+            else:
+                st.caption(f"暂无新论文 · 检查间隔：每 {data.get('check_interval_h',12)}h")
+
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("")
+
+# ══════════════════════════════════════════
+# Tab 4：我的笔记
 # ══════════════════════════════════════════
 with tab_notes:
     st.subheader("📌 我的笔记库")
