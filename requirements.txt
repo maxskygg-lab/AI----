@@ -1,5 +1,4 @@
 streamlit
-zhipuai>=2.0.0
 langchain-community
 langchain-core
 langchain-text-splitters
@@ -12,3 +11,9 @@ sniffio
 requests
 streamlit_agraph
 xlsxwriter
+pandas
+langchain
+
+langchain-google-genai>=2.0.0
+google-generativeai>=0.8.0
+
