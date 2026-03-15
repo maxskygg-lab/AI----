@@ -360,64 +360,8 @@ def get_gap_recommendations():
     return [r for r in st.session_state.graph_references_cache
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
-# ── 关键词追踪 ──
-def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
-    try:
-        cutoff = datetime.fromisoformat(since_date) if since_date else datetime.now() - timedelta(days=7)
-        refined = keyword
-        if " " in keyword and "AND" not in keyword and '"' not in keyword:
-            refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in keyword.split()])
-        results = list(arxiv.Search(
-            query=refined, max_results=30,
-            sort_by=arxiv.SortCriterion.SubmittedDate
-        ).results())
-        out = []
-        for r in results:
-            if r.published.replace(tzinfo=None) > cutoff:
-                out.append({
-                    "title":     r.title,
-                    "authors":   ", ".join([a.name for a in r.authors]),
-                    "published": r.published.strftime("%Y-%m-%d"),
-                    "summary":   r.summary,
-                    "entry_id":  r.entry_id,
-                    "obj":       r,
-                })
-        return out
-    except Exception as e:
-        st.warning(f"追踪「{keyword}」时出错: {e}"); return []
 
-def tracker_run_all(force=False):
-    if not st.session_state.trackers: return
-    now = datetime.now()
-    total = 0
-    for kw, data in st.session_state.trackers.items():
-        last = data.get("last_checked")
-        ih   = data.get("check_interval_h", 12)
-        if not force and last:
-            elapsed = (now - datetime.fromisoformat(last)).total_seconds() / 3600
-            if elapsed < ih:
-                total += len(data.get("new_papers",[])); continue
-        new = tracker_check_one(kw, since_date=data.get("last_checked"))
-        seen = set(data.get("seen_ids",[]))
-        truly_new = [p for p in new if p["entry_id"] not in seen]
-        data["new_papers"]   = truly_new + data.get("new_papers",[])
-        data["last_checked"] = now.isoformat(timespec="seconds")
-        total += len(data["new_papers"])
-    st.session_state.tracker_total_new = total
-
-def tracker_mark_read(keyword: str):
-    data = st.session_state.trackers.get(keyword, {})
-    for p in data.get("new_papers",[]): data.setdefault("seen_ids",[]).append(p["entry_id"])
-    data["new_papers"] = []
-    st.session_state.tracker_total_new = sum(
-        len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
-    )
-
-# 启动时自动静默检查
-if st.session_state.trackers:
-    tracker_run_all(force=False)
-
-# ================= 5. 图谱渲染 =================
+# ================= 4. 图谱渲染 =================
 def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, details = [], [], {}
@@ -539,9 +483,6 @@ with st.sidebar:
             os.remove(path); st.rerun()
 
 # ================= 7. 主界面 =================
-_n_new = st.session_state.tracker_total_new
-_track_label = f"🔔 追踪提醒 ({_n_new} 新)" if _n_new > 0 else "🔔 关键词追踪"
-
 tab_main, tab_read, tab_track, tab_notes = st.tabs([
     "🔍 学术检索 & 图谱", "📖 研读空间", _track_label, "📌 我的笔记"
 ])
