@@ -795,130 +795,97 @@ with tab_main:
 # ══════════════════════════════════════════
 with tab_read:
     t = active_topic_data()
-    st.markdown(
-        f'<div class="section-divider">💬 研读空间 — '
-        f'<span class="topic-badge">🗂️ {st.session_state.active_topic}</span> · {len(t["files"])} 篇入库</div>',
-        unsafe_allow_html=True
-    )
-    rc1, rc2 = st.columns([2, 3])
-    with rc1:
-        reading_mode = st.radio("模式", ["🟢 快速问答", "📖 逐段精读"], horizontal=True)
-    with rc2:
-        if t["files"]:
-            st.session_state.selected_scope = st.selectbox("专注范围", ["🌐 对比所有论文"] + t["files"])
-
+    
+    # 1. 顶部状态栏
+    st.caption(f"当前主题: {st.session_state.active_topic} | 📚 已索引 {len(t['files'])} 篇论文")
     if not t["files"]:
-        st.info("📥 请先在「学术检索 & 图谱」标签页下载论文，或在左侧侧边栏上传 PDF。")
-    else:
-        # 知识漏洞推荐逻辑
-        if st.session_state.pending_note and st.session_state.pending_note.get("has_gap"):
-            recs = get_gap_recommendations()
-            if recs:
-                st.markdown('<div class="gap-box"><b>🔍 知识漏洞推荐</b></div>', unsafe_allow_html=True)
-                for r in recs:
-                    rx1, rx2 = st.columns([5, 1])
-                    with rx1: st.caption(r['title'])
-                    with rx2:
-                        if r.get('arxiv_id') and st.button("⬇️", key=f"gap_{r['arxiv_id']}"):
-                            with st.spinner("下载..."):
-                                try:
-                                    paper = next(arxiv.Search(id_list=[r['arxiv_id']]).results())
-                                    pdf_path = paper.download_pdf(dirpath=tempfile.gettempdir())
-                                    process_and_add_to_topic(pdf_path, r['title'], user_api_key)
-                                    st.success("已入库！"); st.rerun()
-                                except Exception as e: st.error(str(e))
+        st.info("👋 欢迎！请先在左侧上传 PDF 或在「学术检索」页下载论文入库。")
+    
+    # 2. 聊天历史回显 (使用 Streamlit 原生组件)
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-        # 保存笔记逻辑
-        if st.session_state.pending_note and st.session_state.pending_note.get("content"):
-            with st.expander("📌 保存为笔记", expanded=False):
-                note_tags_raw = st.text_input("标签（逗号分隔）", placeholder="方法论, Transformer", key="note_tags_input")
-                if st.button("💾 保存", type="primary"):
-                    tags = [tg.strip() for tg in note_tags_raw.split(",") if tg.strip()]
-                    st.session_state.notes.append({
-                        "id": str(uuid.uuid4())[:8],
-                        "content": st.session_state.pending_note["content"],
-                        "question": st.session_state.pending_note.get("question", ""),
-                        "tags": tags,
-                        "topic": st.session_state.active_topic,
-                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    })
-                    st.session_state.pending_note = None
-                    st.success("✅ 已保存到「我的笔记」"); st.rerun()
+    # 3. 聊天输入框 (原生固定底部)
+    if prompt := st.chat_input("向 DeepSeek 提问 (支持对比、总结、细节询问)..."):
+        # 用户消息上屏
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-        # 渲染聊天记录
-        chat_html = ""
-        for msg in st.session_state.chat_history[-20:]:
-            if msg["role"] == "system_notice":
-                chat_html += f'<div class="chat-notice">📢 {msg["content"]}</div>'
-            elif msg["role"] == "user":
-                chat_html += f'<div class="chat-user">🧑 {msg["content"]}</div>'
+        # AI 回答生成
+        with st.chat_message("assistant"):
+            if not t["db"]:
+                response = "请先上传或下载论文到当前主题。"
+                st.markdown(response)
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
             else:
-                chat_html += f'<div class="chat-bot">🤖 {msg["content"].replace(chr(10),"<br>")}</div>'
-        st.markdown(f'<div class="chat-panel">{chat_html}</div>', unsafe_allow_html=True)
-
-        # 输入框
-        ci1, ci2 = st.columns([6, 1])
-        with ci1:
-            user_input = st.text_input("提问", placeholder="输入问题...", label_visibility="collapsed", key="chat_input_box")
-        with ci2:
-            send_btn = st.button("发送 ➤", use_container_width=True)
-
-        if send_btn and user_input.strip():
-            prompt = user_input.strip()
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.spinner("深度检索资料并对比中 (DeepSeek)..."):
                 try:
-                    sk = 15 if "精读" in reading_mode else 10
-                    scope = st.session_state.selected_scope
+                    # A. 检索阶段 (增加 k 值以利用 DeepSeek 长窗口)
+                    with st.status("🔍 DeepSeek 正在阅读文献...", expanded=False) as status:
+                        # 检索 25 个片段，确保信息充足
+                        docs = t["db"].max_marginal_relevance_search(prompt, k=25, fetch_k=50)
+                        
+                        # 构建来源预览
+                        source_text = "\n\n".join([f"**[{i+1}] {d.metadata.get('source_paper','未知')}**: {d.page_content[:150]}..." for i,d in enumerate(docs)])
+                        st.markdown(source_text)
+                        status.update(label=f"✅ 已检索到 {len(docs)} 个相关片段", state="complete")
                     
-                    docs = []
-                    if scope == "🌐 对比所有论文":
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=30, lambda_mult=0.5)
-                        if len(t["files"]) > 1:
-                            existing_sources = set(d.metadata.get('source_paper') for d in docs)
-                            for paper_name in t["files"]:
-                                if paper_name not in existing_sources:
-                                    extra_docs = t["db"].similarity_search(prompt, k=2, filter={"source_paper": paper_name})
-                                    docs.extend(extra_docs)
-                    else:
-                        fd = {"source_paper": scope}
-                        docs = t["db"].max_marginal_relevance_search(prompt, k=sk, fetch_k=20, lambda_mult=0.6, filter=fd)
+                    # B. 构建上下文
+                    context = "\n\n".join([f"[来源文档:{d.metadata.get('source_paper')}] 内容: {d.page_content}" for d in docs])
+                    
+                    # C. 深度思考 Prompt
+                    sys_prompt = (
+                        "你是一名专业的学术研究助手。请基于提供的论文片段回答问题。\n"
+                        "## 准则\n"
+                        "1. **结构化回答**：使用 Markdown 格式，合理使用标题、加粗和列表。\n"
+                        "2. **基于事实**：严格基于[参考资料]回答。若资料不足，请明确说明。\n"
+                        "3. **引用标注**：在关键观点后标注来源，如 `(Author, Year)` 或 `[来源: 文件名]`。\n"
+                        "4. **深度思考**：在回答前先分析不同材料的关联和矛盾点。\n"
+                        "5. **对比模式**：若涉及对比，必须使用 Markdown 表格。\n\n"
+                        f"## 参考资料\n{context}"
+                    )
+                    
+                    # D. 流式输出
+                    message_placeholder = st.empty()
+                    full_response = ""
+                    llm = get_deepseek_llm(USER_API_KEY, temperature=0.4) # 稍微提高温度以增加流畅度
+                    
+                    # 开始流式接收
+                    stream = llm.stream([
+                        SystemMessage(content=sys_prompt),
+                        HumanMessage(content=prompt)
+                    ])
+                    
+                    for chunk in stream:
+                        if chunk.content:
+                            full_response += chunk.content
+                            message_placeholder.markdown(full_response + "▌")
+                    
+                    message_placeholder.markdown(full_response)
+                    
+                    # E. 存入历史 & 笔记缓存
+                    st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                    st.session_state.pending_note = {"content": full_response, "question": prompt}
 
-                    if not docs:
-                        answer = "未找到相关内容，请尝试换个问法。"
-                    else:
-                        context_list = []
-                        for d in docs:
-                            src = d.metadata.get('source_paper', '未知来源')
-                            pg = d.metadata.get('page', 0) + 1
-                            context_list.append(f"【来源文件：{src} | 第 {pg} 页】\n内容：{d.page_content}")
-                        
-                        context = "\n\n---\n\n".join(context_list)
-                        
-                        sys_p = (
-                            "你是一位资深科研助理。请基于以下提供的多篇论文片段进行回答。\n"
-                            "### 任务要求：\n"
-                            "1. 如果用户要求对比，请清晰地列出不同论文在观点、方法或结果上的【相同点】和【不同点】。\n"
-                            "2. 回答必须严格基于资料，引用时请标注来源（如：据[论文A]所述）。\n"
-                            "3. 数学公式使用 $...$ 格式。\n"
-                            f"4. 如果资料中没有提到相关信息，请直接回答【资料不足】。\n\n"
-                            f"### 检索到的资料：\n{context}\n\n"
-                            f"### 用户问题：\n{prompt}"
-                        )
-                        
-                        # 修改点：使用 DeepSeek
-                        llm = get_deepseek_llm(USER_API_KEY, temperature=0.1)
-                        answer = fix_latex(llm.invoke(sys_p).content)
-                    
-                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                    st.session_state.pending_note = {
-                        "content": answer, 
-                        "question": prompt,
-                        "has_gap": detect_knowledge_gap(answer, docs if docs else [])
-                    }
-                    st.rerun()
-                except Exception as e: 
+                except Exception as e:
                     st.error(f"生成出错: {e}")
+
+    # 4. 笔记保存快捷入口 (显示在对话下方)
+    if st.session_state.pending_note:
+        with st.expander("📝 将刚才的回答保存为笔记", expanded=False):
+            tag_input = st.text_input("添加标签", placeholder="例如: transformer, 对比分析")
+            if st.button("保存笔记"):
+                st.session_state.notes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "topic": st.session_state.active_topic,
+                    "tags": tag_input.split(","),
+                    "question": st.session_state.pending_note["question"],
+                    "content": st.session_state.pending_note["content"],
+                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M")
+                })
+                st.session_state.pending_note = None
+                st.success("已保存！")
 
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
