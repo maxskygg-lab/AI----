@@ -9,7 +9,6 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # ================= 1. 环境检查与导入 =================
 try:
     import langchain_community, fitz
-    # --- 修改点：引入 OpenAI 接口适配 DeepSeek 和 HuggingFace 免费向量 ---
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import HuggingFaceEmbeddings
 except ImportError as e:
@@ -95,11 +94,10 @@ st.markdown("""
 st.title("📖 AI 深度研读助手 v5 (DeepSeek Kernel)")
 
 # ================= API Key =================
-# --- 修改点：适配 DeepSeek Key ---
 try:
     USER_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
 except:
-    USER_API_KEY = "" # 避免报错，可在侧边栏提示用户
+    USER_API_KEY = ""
 
 SS_API_KEY = st.secrets.get("SS_API_KEY", "")
 
@@ -112,7 +110,7 @@ defaults = {
     "suggested_query":        "",
     "focus_paper_id":         None,
     "contributions_cache":    {},
-    "score_cache":            {}, # --- 修改点：新增打分缓存 ---
+    "score_cache":            {}, 
     "chat_history":           [],
     "topics":                 {"默认主题": {"files": [], "chunks": [], "db": None}},
     "active_topic":           "默认主题",
@@ -130,17 +128,99 @@ for k, v in defaults.items():
 
 # ================= 4. 工具函数 =================
 
-# --- 新增：直接下载 ArXiv PDF，提高效率 ---
-def download_arxiv_pdf_direct(arxiv_id):
-    clean_id = get_pure_arxiv_id(arxiv_id)
-    pdf_url = f"https://arxiv.org/pdf/{clean_id}.pdf"
-    pdf_path = os.path.join(tempfile.gettempdir(), f"{clean_id}.pdf")
-    r = requests.get(pdf_url, timeout=15)
-    with open(pdf_path, 'wb') as f:
-        f.write(r.content)
-    return pdf_path
+# --- 修改点 1：新增 Mock 包装类，无缝将 SS 数据伪装成原来的 ArXiv 格式，防止破坏下层 UI 渲染 ---
+class MockArxivResult:
+    def __init__(self, ss_data):
+        self.title = ss_data.get('title') or '无标题'
+        # 伪装 authors 列表，让 a.name 可以正常调用
+        self.authors = [type('Author', (), {'name': a.get('name', '未知作者')}) for a in ss_data.get('authors', [])]
+        
+        # 处理时间格式兼容
+        pub_date = ss_data.get('publicationDate')
+        if pub_date:
+            try:
+                self.published = datetime.strptime(pub_date, "%Y-%m-%d")
+            except:
+                self.published = datetime(ss_data.get('year') or 2000, 1, 1)
+        else:
+            self.published = datetime(ss_data.get('year') or 2000, 1, 1)
+            
+        self.summary = ss_data.get('abstract') or "该论文暂无摘要信息。"
+        
+        # 链接处理：优先用 ArXiv 原生链接，没有就用 SS 链接
+        ext_ids = ss_data.get('externalIds', {})
+        arxiv_id = ext_ids.get('ArXiv')
+        if arxiv_id:
+            self.entry_id = f"https://arxiv.org/abs/{arxiv_id}"
+        else:
+            self.entry_id = ss_data.get('url') or f"https://www.semanticscholar.org/paper/{ss_data.get('paperId')}"
+            
+        self.ss_paper_id = ss_data.get('paperId')
+        self.open_access_pdf = ss_data.get('openAccessPdf') or {}
+        self.citation_count = ss_data.get('citationCount', 0)
 
-# --- 新增：DeepSeek 模型获取函数 ---
+# --- 修改点 2：新增 SS API 专属生成器，完全替代原来的 arxiv.Search().results() ---
+def ss_search_generator(query, api_key, sort_mode):
+    offset = 0
+    limit = 50
+    while True:
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        headers = {"x-api-key": api_key} if api_key else {}
+        params = {
+            "query": query,
+            "offset": offset,
+            "limit": limit,
+            "fields": "title,authors,year,publicationDate,abstract,externalIds,url,openAccessPdf,citationCount"
+        }
+        # SS 排序映射
+        if "最新" in sort_mode:
+            params["sort"] = "publicationDate:desc"
+        elif "引用量" in sort_mode:
+            params["sort"] = "citationCount:desc"
+            
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json().get('data', [])
+                if not data: break
+                for item in data:
+                    yield MockArxivResult(item)
+                
+                # 如果超出了总数或 API 最大便宜限制，停止
+                if offset + limit >= r.json().get('total', 0) or offset >= 9900:
+                    break
+                offset += limit
+            elif r.status_code == 429:
+                st.warning("⚠️ 请求过于频繁，请稍后再试（拉取下一页已暂停）。")
+                break
+            else:
+                break
+        except Exception as e:
+            st.warning(f"搜索发生异常: {e}")
+            break
+
+# --- 修改点 3：增强 PDF 下载逻辑，保留原来 ArXiv 直链的同时，支持 SS 的免费 PDF 链接 ---
+def download_arxiv_pdf_direct(url_or_id, open_access_url=None):
+    # 如果是 ArXiv 的，继续严格按照历史要求拼接原生直链
+    if "arxiv.org" in url_or_id or re.match(r'^\d{4}\.\d{4,5}', url_or_id):
+        clean_id = get_pure_arxiv_id(url_or_id)
+        pdf_url = f"https://arxiv.org/pdf/{clean_id}.pdf"
+        pdf_path = os.path.join(tempfile.gettempdir(), f"{clean_id}.pdf")
+        r = requests.get(pdf_url, timeout=15)
+        with open(pdf_path, 'wb') as f:
+            f.write(r.content)
+        return pdf_path
+    # 如果不是 ArXiv，尝试使用 SS 给的免费开源下载链接
+    elif open_access_url:
+        pdf_path = os.path.join(tempfile.gettempdir(), f"ss_pdf_{uuid.uuid4().hex[:8]}.pdf")
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        r = requests.get(open_access_url, headers=headers, timeout=20)
+        with open(pdf_path, 'wb') as f:
+            f.write(r.content)
+        return pdf_path
+    else:
+        raise Exception("该论文既非 ArXiv 论文，也无 Semantic Scholar 开源 PDF 链接，暂不支持一键下载。")
+
 def get_deepseek_llm(api_key, temperature=0.1):
     if not api_key:
         st.error("请先配置 DEEPSEEK_API_KEY"); st.stop()
@@ -151,7 +231,6 @@ def get_deepseek_llm(api_key, temperature=0.1):
         temperature=temperature
     )
 
-# --- 新增：免费 Embeddings 模型获取函数（带缓存） ---
 @st.cache_resource
 def get_embeddings_model():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -311,7 +390,6 @@ def fetch_graph_data(arxiv_id, ss_key=None):
             if attempt == 2: return None
     return None
 
-# --- 修改点：新增依据标题获取 SS 详细元数据的函数（用于增强问答） ---
 @st.cache_data(ttl=3600)
 def fetch_ss_paper_details_by_title(title, ss_key=None):
     clean_title = title.replace(".pdf", "").strip()
@@ -331,7 +409,6 @@ def get_one_line_contribution(abstract, title, api_key):
     if key in st.session_state.contributions_cache:
         return st.session_state.contributions_cache[key]
     try:
-        # --- 修改点：调用 DeepSeek ---
         llm = get_deepseek_llm(api_key, temperature=0.0)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
@@ -343,7 +420,6 @@ def get_one_line_contribution(abstract, title, api_key):
     st.session_state.contributions_cache[key] = result
     return result
 
-# --- 修改点：新增依据 SS 真实数据的单篇论文打分函数 ---
 def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
     key = title[:60]
     if key in st.session_state.score_cache:
@@ -395,7 +471,6 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
         
-        # --- 修改点：使用 HuggingFace 免费向量 ---
         embeddings = get_embeddings_model()
         
         batch = 10
@@ -420,7 +495,6 @@ def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
     
-    # --- 修改点：使用 HuggingFace 免费向量 ---
     embeddings = get_embeddings_model()
     t["db"] = FAISS.from_documents(t["chunks"], embeddings)
 
@@ -438,27 +512,33 @@ def get_gap_recommendations():
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
 # ── 关键词追踪 ──
+# --- 修改点 4：追踪器也替换为底层调用 SS 接口 ---
 def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
     try:
         cutoff = datetime.fromisoformat(since_date) if since_date else datetime.now() - timedelta(days=7)
-        refined = keyword
-        if " " in keyword and "AND" not in keyword and '"' not in keyword:
-            refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in keyword.split()])
-        results = list(arxiv.Search(
-            query=refined, max_results=30,
-            sort_by=arxiv.SortCriterion.SubmittedDate
-        ).results())
+        
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        headers = {"x-api-key": st.secrets.get("SS_API_KEY", "")}
+        params = {
+            "query": keyword,
+            "limit": 30,
+            "fields": "title,authors,year,publicationDate,abstract,externalIds,url,openAccessPdf",
+            "sort": "publicationDate:desc"
+        }
+        r = requests.get(url, headers=headers, params=params, timeout=15)
         out = []
-        for r in results:
-            if r.published.replace(tzinfo=None) > cutoff:
-                out.append({
-                    "title":     r.title,
-                    "authors":   ", ".join([a.name for a in r.authors]),
-                    "published": r.published.strftime("%Y-%m-%d"),
-                    "summary":   r.summary,
-                    "entry_id":  r.entry_id,
-                    "obj":       r,
-                })
+        if r.status_code == 200:
+            for item in r.json().get('data', []):
+                mock_res = MockArxivResult(item)
+                if mock_res.published.replace(tzinfo=None) > cutoff:
+                    out.append({
+                        "title":     mock_res.title,
+                        "authors":   ", ".join([a.name for a in mock_res.authors]),
+                        "published": mock_res.published.strftime("%Y-%m-%d"),
+                        "summary":   mock_res.summary,
+                        "entry_id":  mock_res.entry_id,
+                        "obj":       mock_res,
+                    })
         return out
     except Exception as e:
         st.warning(f"追踪「{keyword}」时出错: {e}"); return []
@@ -628,7 +708,6 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
-    # 修改点：移除了原本控制数量的组件，改为只占两列
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
@@ -637,20 +716,15 @@ with tab_main:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("检索论文中..."):
+        with st.spinner("检索论文中 (使用 Semantic Scholar)..."):
             try:
-                asort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                refined = search_query
-                if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-                
-                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
-                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                # --- 修改点 5：彻底使用刚刚写好的 SS 生成器，丢弃 arxiv.Search ---
+                raw_gen = ss_search_generator(search_query, ss_api_key, sort_mode)
                 st.session_state.search_generator = raw_gen
                 raw = list(itertools.islice(raw_gen, 50))
                 
-                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                # 因为 SS API 已经携带了 citationCount，我们可以直接填入
+                st.session_state.search_results = [{"obj":r, "citations": r.citation_count} for r in raw]
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
                 st.session_state.focus_paper_id = None
@@ -658,20 +732,14 @@ with tab_main:
 
         if st.session_state.search_results:
             t0 = time.time()
-            # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
-            with st.spinner("同步引用数..."):
-                # 1. 获取引用数
-                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                for item in st.session_state.search_results:
-                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
+            with st.spinner("处理数据展示..."):
+                # --- 修改点 6：不删除你的老代码，通过注释安全跳过。因为 SS 自带引用数，无需再二次请求了 ---
+                # id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
+                # for item in st.session_state.search_results:
+                #     item["citations"] = id2c.get(item['obj'].entry_id, 0)
                 
-                # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                
-                # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
-                # 确保 USER_API_KEY 已在 secrets 或上方定义
-                # auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
                 
                 st.session_state.citations_loaded = True
             
@@ -737,7 +805,6 @@ with tab_main:
                         if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
                             with st.spinner("下载中..."):
                                 try:
-                                    # --- 修改点：直接使用 URL 下载，提速且符合历史要求 ---
                                     pdf_path = download_arxiv_pdf_direct(arxiv_id)
                                     if process_and_add_to_topic(pdf_path, info['title'], user_api_key, topic_name=target_topic):
                                         st.success("✅ 入库成功！"); st.balloons()
@@ -759,7 +826,6 @@ with tab_main:
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
-        # 修改点：显示“已加载”数量
         st.markdown(
             f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
@@ -780,14 +846,12 @@ with tab_main:
             cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-                # 完整作者
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
                     f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                     unsafe_allow_html=True
                 )
                 ck = res.title[:60]
-                # --- 修改点：增加打分列 ---
                 cc, cg, cs = st.columns([4,1,1])
                 with cc:
                     box_content = ""
@@ -807,20 +871,19 @@ with tab_main:
                         with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
                         st.rerun()
                 with cs:
-                    # --- 修改点：新增打分按钮逻辑 ---
                     if st.button("⭐ 打分", key=f"score_{i}"):
                         with st.spinner("获取SS数据并打分..."): get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
                         st.rerun()
-                # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
-                with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
+                # --- 修改点 7：把写死的 ArXiv 文字改成了通用“来源”，因为部分来自 SS 纯净库 ---
+                with b1: st.markdown(f"[🔗 原文来源]({res.entry_id})")
                 with b2:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
                         with st.spinner("下载解析..."):
                             try:
-                                # --- 修改点：直接使用 URL 下载 ---
-                                pdf_path = download_arxiv_pdf_direct(res.entry_id)
+                                # --- 修改点 8：将 SS 的 open_access 链接也传进去，如果不是 ArXiv 也能下载 ---
+                                pdf_path = download_arxiv_pdf_direct(res.entry_id, res.open_access_pdf.get('url'))
                                 process_and_add_to_topic(pdf_path, res.title, user_api_key)
                                 st.success("入库成功！")
                             except Exception as e: st.error(str(e))
@@ -829,37 +892,20 @@ with tab_main:
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
-       # 这里的缩进必须与上方的 for 循环对齐
-        # 修改点：加载更多功能（自动分析前 50 篇）
     if st.session_state.search_generator:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
-            # 统一提示语
             with st.spinner("正在拉取新论文摘要..."):
-                # 从 generator 中切取下 50 篇
                 more_raw = list(itertools.islice(st.session_state.search_generator, 50))
                 
                 if more_raw:
-                    # 1. 封装新结果
-                    new_results = [{"obj": r, "citations": None} for r in more_raw]
-                    
-                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
-                    id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
-                    for item in new_results:
-                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                    
-                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
-                    # 确保 auto_batch_contributions 已在工具函数区定义
-                    # auto_batch_contributions(new_results, USER_API_KEY, limit=50)
-                    
-                    # 4. 合并到全局搜索结果中
+                    # --- 修改点 9：加载更多时，也只需取生成器吐出来的 citation_count ---
+                    new_results = [{"obj": r, "citations": r.citation_count} for r in more_raw]
                     st.session_state.search_results.extend(new_results)
                     
-                    # 5. 如果当前是引用量排序模式，则重新全局排序
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
                     
-                    # 6. 刷新页面显示结果
                     st.rerun()
                 else:
                     st.info("✨ 到底啦，没有更多匹配的论文了。")
@@ -867,13 +913,10 @@ with tab_main:
 # Tab 2：研读空间
 # ══════════════════════════════════════════
 with tab_read:
-    # --- 1. 顶部控制栏：精准控制 Scope ---
     t = active_topic_data()
     
-    # 布局：左侧选模式，右侧状态显示
     c_ctrl, c_info = st.columns([2, 3])
     with c_ctrl:
-        # 核心修改：明确的范围选择，不再默认全库检索
         scope_options = ["🌐 全库综合 (对比/综述)"] + t["files"]
         selected_scope = st.selectbox(
             "📚 阅读范围 (Scope)", 
@@ -882,7 +925,6 @@ with tab_read:
             help="选择“全库”进行跨论文对比；选择“单篇”将只检索该论文内容，更省 Token 且更精准。"
         )
     with c_info:
-        # 显示当前 Token 使用情况预估或入库状态
         if selected_scope == "🌐 全库综合 (对比/综述)":
             st.caption(f"🚀 当前模式：检索所有 {len(t['files'])} 篇论文")
         else:
@@ -890,9 +932,7 @@ with tab_read:
 
     st.divider()
 
-    # --- 2. 聊天历史回显 (原生组件) ---
     if not st.session_state.chat_history:
-        # 欢迎引导语
         with st.chat_message("assistant"):
             st.markdown(f"👋 我是你的 DeepSeek 研读助手。当前主题库中有 **{len(t['files'])}** 篇论文。")
             if t["files"]:
@@ -902,30 +942,23 @@ with tab_read:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # --- 3. 聊天输入与处理 ---
     if prompt := st.chat_input("输入问题..."):
-        # 0. 检查是否有库
         if not t["db"]:
             st.error("请先在左侧上传 PDF 或从检索页下载论文入库！")
             st.stop()
 
-        # 1. 用户消息上屏
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # 2. AI 生成回答
         with st.chat_message("assistant"):
-            # 占位符用于流式输出
             message_placeholder = st.empty()
             full_response = ""
             
             try:
-                # --- 核心优化 A：精准检索策略 ---
                 search_kwargs = {}
                 filter_rule = None
                 
-                # 如果选择了特定论文，构建 metadata 过滤器
                 if selected_scope != "🌐 全库综合 (对比/综述)":
                     filter_rule = {"source_paper": selected_scope}
                     search_kwargs = {"k": 20, "filter": filter_rule}
@@ -935,31 +968,26 @@ with tab_read:
                     status_text = f"🔍 正在全库 {len(t['files'])} 篇论文中检索..."
 
                 with st.spinner(status_text):
-                    # 执行检索
                     if filter_rule:
                         docs = t["db"].similarity_search(prompt, **search_kwargs)
-                        # --- 修改点：单篇模式下，额外获取 SS 真实元数据以增强问答 ---
                         ss_data = fetch_ss_paper_details_by_title(selected_scope, ss_api_key)
                     else:
                         docs = t["db"].max_marginal_relevance_search(prompt, **search_kwargs)
                         ss_data = None
 
-                # --- 核心优化 B：构建更智能的 Prompt ---
                 if not docs:
                     full_response = "⚠️ 未在文档中检索到相关信息，请尝试更换关键词或检查文档是否完整。"
                     message_placeholder.markdown(full_response)
                 else:
-                    # 整理上下文，带上来源标记
                     context_text = ""
                     refs = []
                     for i, d in enumerate(docs):
                         src = d.metadata.get('source_paper', '未知')
-                        page = d.metadata.get('page', 0) + 1 # PyPDFLoader通常从0开始
+                        page = d.metadata.get('page', 0) + 1 
                         snippet = d.page_content.replace('\n', ' ')
                         context_text += f"[资料{i+1} | {src} (P{page})]: {snippet}\n\n"
                         refs.append(f"**[{i+1}] {src} (P{page})**: {snippet[:100]}...")
                         
-                    # --- 修改点：如果获取到了 SS 真实数据，注入给 LLM ---
                     ss_context = ""
                     if ss_data:
                         tldr = ss_data.get('tldr', {}).get('text', '无') if ss_data.get('tldr') else '无'
@@ -974,7 +1002,6 @@ with tab_read:
                             f"**指令**：你在回答背景、影响力和核心结论时，必须优先以这部分的真实元数据为准，不要编造不存在的事实。\n"
                         )
 
-                    # 动态 System Prompt
                     if selected_scope != "🌐 全库综合 (对比/综述)":
                         sys_prompt = (
                             f"你正在辅助用户精读论文《{selected_scope}》。\n"
@@ -994,7 +1021,6 @@ with tab_read:
                             "3. 保持客观中立。"
                         )
 
-                    # --- 核心优化 C：调用 DeepSeek (流式) ---
                     with st.expander("📚 查看 AI 参考的原文片段 (Sources)", expanded=False):
                         st.markdown("\n\n".join(refs))
 
@@ -1112,7 +1138,6 @@ with tab_track:
 
             if new_papers:
                 for paper in new_papers:
-                    # 完整标题、完整作者、完整摘要，不截断
                     st.markdown(
                         f"""
                         <div class="new-paper-card">
@@ -1130,13 +1155,16 @@ with tab_track:
                         """, unsafe_allow_html=True,
                     )
                     pb1,pb2,pb3 = st.columns([1,1,4])
-                    with pb1: st.markdown(f"[🔗 ArXiv]({paper['entry_id']})")
+                    # --- 修改点 10：这里的 tracker 来源也改为了通用文字 ---
+                    with pb1: st.markdown(f"[🔗 原文来源]({paper['entry_id']})")
                     with pb2:
                         if st.button("⬇️ 入库", key=f"tr_dl_{paper['entry_id']}"):
                             with st.spinner("下载中…"):
                                 try:
-                                    # --- 修改点：使用统一的高效直链下载函数 ---
-                                    pdf_path = download_arxiv_pdf_direct(paper['entry_id'])
+                                    # --- 修改点 11：支持传递 SS 的开放下载链接，同时兼容你的 ArXiv 直链逻辑 ---
+                                    obj = paper.get("obj")
+                                    open_access_url = obj.open_access_pdf.get('url') if obj else None
+                                    pdf_path = download_arxiv_pdf_direct(paper['entry_id'], open_access_url)
                                     process_and_add_to_topic(pdf_path, paper['title'], user_api_key)
                                     st.success("已入库！")
                                 except Exception as e: st.error(str(e))
@@ -1184,7 +1212,7 @@ with tab_notes:
                     st.rerun()
             if note.get("question"):
                 st.markdown(f"**❓ {note['question']}**")
-            st.markdown(note["content"])   # 完整内容，不截断
+            st.markdown(note["content"]) 
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("---")
