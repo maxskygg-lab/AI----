@@ -112,6 +112,7 @@ defaults = {
     "suggested_query":        "",
     "focus_paper_id":         None,
     "contributions_cache":    {},
+    "score_cache":            {}, # --- 修改点：新增打分缓存 ---
     "chat_history":           [],
     "topics":                 {"默认主题": {"files": [], "chunks": [], "db": None}},
     "active_topic":           "默认主题",
@@ -128,6 +129,16 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # ================= 4. 工具函数 =================
+
+# --- 新增：直接下载 ArXiv PDF，提高效率 ---
+def download_arxiv_pdf_direct(arxiv_id):
+    clean_id = get_pure_arxiv_id(arxiv_id)
+    pdf_url = f"https://arxiv.org/pdf/{clean_id}.pdf"
+    pdf_path = os.path.join(tempfile.gettempdir(), f"{clean_id}.pdf")
+    r = requests.get(pdf_url, timeout=15)
+    with open(pdf_path, 'wb') as f:
+        f.write(r.content)
+    return pdf_path
 
 # --- 新增：DeepSeek 模型获取函数 ---
 def get_deepseek_llm(api_key, temperature=0.1):
@@ -300,6 +311,21 @@ def fetch_graph_data(arxiv_id, ss_key=None):
             if attempt == 2: return None
     return None
 
+# --- 修改点：新增依据标题获取 SS 详细元数据的函数（用于增强问答） ---
+@st.cache_data(ttl=3600)
+def fetch_ss_paper_details_by_title(title, ss_key=None):
+    clean_title = title.replace(".pdf", "").strip()
+    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={clean_title}&limit=1&fields=title,year,authors,citationCount,influentialCitationCount,tldr,venue"
+    headers = {"x-api-key": ss_key} if ss_key else {}
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data:
+                return data[0]
+    except: pass
+    return None
+
 def get_one_line_contribution(abstract, title, api_key):
     key = title[:60]
     if key in st.session_state.contributions_cache:
@@ -315,6 +341,38 @@ def get_one_line_contribution(abstract, title, api_key):
     except Exception as e: 
         result = "（生成失败）"
     st.session_state.contributions_cache[key] = result
+    return result
+
+# --- 修改点：新增依据 SS 真实数据的单篇论文打分函数 ---
+def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
+    key = title[:60]
+    if key in st.session_state.score_cache:
+        return st.session_state.score_cache[key]
+    try:
+        clean_id = get_pure_arxiv_id(arxiv_id)
+        url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount"
+        headers = {"x-api-key": ss_key} if ss_key else {}
+        ss_info = ""
+        try:
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                tldr = data.get("tldr", {}).get("text", "无") if data.get("tldr") else "无"
+                inf_cites = data.get("influentialCitationCount", 0)
+                ss_info = f"\n\nSemantic Scholar真实数据：\n- 极具影响力引用数: {inf_cites}\n- TLDR极简摘要: {tldr}"
+        except: pass
+
+        llm = get_deepseek_llm(api_key, temperature=0.1)
+        prompt = (
+            f"请根据这篇论文的信息，结合其学术价值、潜力和提供的真实影响力指标，对其进行综合打分（满分100分）。\n"
+            f"请严格按照此格式输出：【xx分】一句话理由（不超过30字）。\n\n"
+            f"标题：{title}\n摘要：{abstract[:600]}{ss_info}"
+        )
+        res = llm.invoke(prompt)
+        result = res.content.strip()
+    except Exception as e:
+        result = "（打分失败）"
+    st.session_state.score_cache[key] = result
     return result
 
 def fix_latex(text):
@@ -679,8 +737,8 @@ with tab_main:
                         if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
                             with st.spinner("下载中..."):
                                 try:
-                                    paper = next(arxiv.Search(id_list=[arxiv_id]).results())
-                                    pdf_path = paper.download_pdf(dirpath=tempfile.gettempdir())
+                                    # --- 修改点：直接使用 URL 下载，提速且符合历史要求 ---
+                                    pdf_path = download_arxiv_pdf_direct(arxiv_id)
                                     if process_and_add_to_topic(pdf_path, info['title'], user_api_key, topic_name=target_topic):
                                         st.success("✅ 入库成功！"); st.balloons()
                                 except Exception as e: st.error(str(e))
@@ -729,15 +787,29 @@ with tab_main:
                     unsafe_allow_html=True
                 )
                 ck = res.title[:60]
-                cc,cg = st.columns([5,1])
+                # --- 修改点：增加打分列 ---
+                cc, cg, cs = st.columns([4,1,1])
                 with cc:
+                    box_content = ""
                     if ck in st.session_state.contributions_cache:
-                        st.markdown(f'<div class="contribution-box">💡 {st.session_state.contributions_cache[ck]}</div>', unsafe_allow_html=True)
+                        box_content += f"💡 <b>贡献:</b> {st.session_state.contributions_cache[ck]}<br>"
                     else:
-                        st.markdown('<div class="contribution-box" style="color:#aaa;">💡 点击右侧 ✨ 生成核心贡献摘要</div>', unsafe_allow_html=True)
+                        box_content += "💡 <span style='color:#aaa;'>点击右侧 ✨ 生成核心贡献摘要</span><br>"
+                        
+                    if ck in st.session_state.score_cache:
+                        box_content += f"⭐ <b>评分:</b> {st.session_state.score_cache[ck]}"
+                    else:
+                        box_content += "⭐ <span style='color:#aaa;'>点击右侧 ⭐ 获取SS综合打分</span>"
+                        
+                    st.markdown(f'<div class="contribution-box">{box_content}</div>', unsafe_allow_html=True)
                 with cg:
-                    if st.button("✨", key=f"contrib_{i}"):
+                    if st.button("✨ 摘要", key=f"contrib_{i}"):
                         with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
+                        st.rerun()
+                with cs:
+                    # --- 修改点：新增打分按钮逻辑 ---
+                    if st.button("⭐ 打分", key=f"score_{i}"):
+                        with st.spinner("获取SS数据并打分..."): get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
                         st.rerun()
                 # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
@@ -747,7 +819,8 @@ with tab_main:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
                         with st.spinner("下载解析..."):
                             try:
-                                pdf_path = res.download_pdf(dirpath=tempfile.gettempdir())
+                                # --- 修改点：直接使用 URL 下载 ---
+                                pdf_path = download_arxiv_pdf_direct(res.entry_id)
                                 process_and_add_to_topic(pdf_path, res.title, user_api_key)
                                 st.success("入库成功！")
                             except Exception as e: st.error(str(e))
@@ -853,25 +926,23 @@ with tab_read:
                 filter_rule = None
                 
                 # 如果选择了特定论文，构建 metadata 过滤器
-                # 这样 FAISS 就只会去搜这篇论文的 chunk，绝对不会浪费 token 在其他论文上
                 if selected_scope != "🌐 全库综合 (对比/综述)":
                     filter_rule = {"source_paper": selected_scope}
-                    # 单篇模式下，我们可以放心稍微多取几个片段(k=20)，因为相关性很高
                     search_kwargs = {"k": 20, "filter": filter_rule}
                     status_text = f"🔍 正在深度扫描论文《{selected_scope}》..."
                 else:
-                    # 全库模式，使用 MMR 算法去除重复信息，保证多样性
                     search_kwargs = {"k": 15, "fetch_k": 50, "lambda_mult": 0.6}
                     status_text = f"🔍 正在全库 {len(t['files'])} 篇论文中检索..."
 
                 with st.spinner(status_text):
                     # 执行检索
                     if filter_rule:
-                        # 纯相似度检索（单篇推荐用这个，不漏细节）
                         docs = t["db"].similarity_search(prompt, **search_kwargs)
+                        # --- 修改点：单篇模式下，额外获取 SS 真实元数据以增强问答 ---
+                        ss_data = fetch_ss_paper_details_by_title(selected_scope, ss_api_key)
                     else:
-                        # MMR 检索（多篇对比推荐用这个，视野更广）
                         docs = t["db"].max_marginal_relevance_search(prompt, **search_kwargs)
+                        ss_data = None
 
                 # --- 核心优化 B：构建更智能的 Prompt ---
                 if not docs:
@@ -887,10 +958,24 @@ with tab_read:
                         snippet = d.page_content.replace('\n', ' ')
                         context_text += f"[资料{i+1} | {src} (P{page})]: {snippet}\n\n"
                         refs.append(f"**[{i+1}] {src} (P{page})**: {snippet[:100]}...")
+                        
+                    # --- 修改点：如果获取到了 SS 真实数据，注入给 LLM ---
+                    ss_context = ""
+                    if ss_data:
+                        tldr = ss_data.get('tldr', {}).get('text', '无') if ss_data.get('tldr') else '无'
+                        authors = ", ".join([a.get('name', '') for a in ss_data.get('authors', [])])
+                        ss_context = (
+                            f"\n\n【Semantic Scholar 真实元数据补充】\n"
+                            f"- 标题: {ss_data.get('title')}\n"
+                            f"- 作者: {authors}\n"
+                            f"- 发表年份/会议: {ss_data.get('year')} / {ss_data.get('venue')}\n"
+                            f"- 总引用数: {ss_data.get('citationCount')} (其中极具影响力引用: {ss_data.get('influentialCitationCount')})\n"
+                            f"- 官方TLDR摘要: {tldr}\n"
+                            f"**指令**：你在回答背景、影响力和核心结论时，必须优先以这部分的真实元数据为准，不要编造不存在的事实。\n"
+                        )
 
                     # 动态 System Prompt
                     if selected_scope != "🌐 全库综合 (对比/综述)":
-                        # 单篇精读 Prompt
                         sys_prompt = (
                             f"你正在辅助用户精读论文《{selected_scope}》。\n"
                             "请利用提供的[资料片段]回答问题。\n"
@@ -898,9 +983,9 @@ with tab_read:
                             "1. 回答要深入、具体，多引用数据或具体算法步骤。\n"
                             "2. 如果资料中包含公式描述，请还原为 LaTeX 格式。\n"
                             "3. 严禁编造资料中不存在的内容。"
+                            f"{ss_context}"
                         )
                     else:
-                        # 全库对比 Prompt
                         sys_prompt = (
                             "你是一名学术顾问。请综合提供的多篇论文资料回答问题。\n"
                             "要求：\n"
@@ -910,32 +995,27 @@ with tab_read:
                         )
 
                     # --- 核心优化 C：调用 DeepSeek (流式) ---
-                    # 增加来源折叠框，让用户知道 AI 参考了啥
                     with st.expander("📚 查看 AI 参考的原文片段 (Sources)", expanded=False):
                         st.markdown("\n\n".join(refs))
 
                     llm = get_deepseek_llm(USER_API_KEY, temperature=0.3)
                     
-                    # 组合消息
                     messages = [
                         {"role": "system", "content": f"{sys_prompt}\n\n### 检索到的资料：\n{context_text}"},
                         {"role": "user", "content": prompt}
                     ]
                     
-                    # 使用 stream 模式
                     stream = llm.stream(messages)
                     
                     for chunk in stream:
                         if chunk.content:
                             full_response += chunk.content
-                            message_placeholder.markdown(full_response + "▌") # 打字机效果
+                            message_placeholder.markdown(full_response + "▌") 
                     
-                    message_placeholder.markdown(full_response) # 最终显示
+                    message_placeholder.markdown(full_response) 
 
-                # 3. 存入历史
                 st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                 
-                # 4. 自动缓存为待办笔记
                 st.session_state.pending_note = {
                     "content": full_response, 
                     "question": prompt,
@@ -945,14 +1025,13 @@ with tab_read:
             except Exception as e:
                 st.error(f"发生错误: {str(e)}")
 
-    # --- 4. 笔记保存浮窗 (仅在有新回答时显示) ---
     if st.session_state.pending_note:
         st.markdown("---")
         c_note_1, c_note_2 = st.columns([5, 1])
         with c_note_1:
             note_tags = st.text_input("给刚才的回答加个标签？(可选)", placeholder="例如: 核心算法, 实验结果", key="quick_note_tag")
         with c_note_2:
-            st.write("") # 占位对齐
+            st.write("") 
             if st.button("📌 存笔记"):
                 tags = [t.strip() for t in note_tags.split(",")] if note_tags else []
                 st.session_state.notes.append({
@@ -1056,10 +1135,8 @@ with tab_track:
                         if st.button("⬇️ 入库", key=f"tr_dl_{paper['entry_id']}"):
                             with st.spinner("下载中…"):
                                 try:
-                                    obj = paper.get("obj") or next(
-                                        arxiv.Search(id_list=[get_pure_arxiv_id(paper['entry_id'])]).results()
-                                    )
-                                    pdf_path = obj.download_pdf(dirpath=tempfile.gettempdir())
+                                    # --- 修改点：使用统一的高效直链下载函数 ---
+                                    pdf_path = download_arxiv_pdf_direct(paper['entry_id'])
                                     process_and_add_to_topic(pdf_path, paper['title'], user_api_key)
                                     st.success("已入库！")
                                 except Exception as e: st.error(str(e))
