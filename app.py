@@ -12,7 +12,7 @@ try:
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import HuggingFaceEmbeddings
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf")
+    st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf pypdf")
     st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -632,7 +632,9 @@ def render_connected_graph(data, min_cite_filter=0):
     cfg = Config(width="100%", height=560, directed=True, physics=True,
                  nodeHighlightBehavior=True, highlightColor="#F7D154",
                  d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
-    clicked = agraph(nodes=nodes, edges=edges, config=cfg)
+    
+    unique_key = f"graph_{seed}_{min_cite_filter}_{len(nodes)}"
+    clicked = agraph(nodes=nodes, edges=edges, config=cfg, key=unique_key)
     return clicked, details
 
 # ================= 6. 侧边栏 =================
@@ -744,8 +746,7 @@ with tab_main:
                 st.session_state.citations_loaded = True
             
             st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，耗时 {time.time()-t0:.1f}s")
-            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
-
+            
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
         st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
