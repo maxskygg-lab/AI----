@@ -611,14 +611,14 @@ def render_connected_graph(data, min_cite_filter=0):
         if item['rel_type']=='cite':
             edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1.0, dashed=True))
         else:
-            edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
+            edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5, dashed=False))
 
     st.session_state.graph_references_cache = refs_for_gap
     cfg = Config(width="100%", height=560, directed=True, physics=True,
                  nodeHighlightBehavior=True, highlightColor="#F7D154",
                  d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
     
-    unique_key = f"graph_{seed}_{min_cite_filter}_{len(nodes)}"
+    unique_key = f"graph_{seed}_{min_cite_filter}"
     clicked = agraph(nodes=nodes, edges=edges, config=cfg, key=unique_key)
     return clicked, details
 
