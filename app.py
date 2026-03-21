@@ -618,8 +618,12 @@ def render_connected_graph(data, min_cite_filter=0):
                  nodeHighlightBehavior=True, highlightColor="#F7D154",
                  d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
     
-    unique_key = f"graph_{seed}_{min_cite_filter}"
-    clicked = agraph(nodes=nodes, edges=edges, config=cfg, key=unique_key)
+    # 修改点 1：删除下方报错的 key 参数赋值逻辑（也可保留 unique_key 变量不使用）
+    # unique_key = f"graph_{seed}_{min_cite_filter}" 
+    
+    # 修改点 2：去掉传入 agraph() 中的 key 参数，因为它不被该库支持
+    clicked = agraph(nodes=nodes, edges=edges, config=cfg) 
+    
     return clicked, details
 
 # ================= 6. 侧边栏 =================
