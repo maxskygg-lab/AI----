@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os, time, tempfile, re, math, uuid, itertools, io
-import arxiv, requests
+import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -128,14 +128,12 @@ for k, v in defaults.items():
 
 # ================= 4. 工具函数 =================
 
-# --- 修改点 1：新增 Mock 包装类，无缝将 SS 数据伪装成原来的 ArXiv 格式，防止破坏下层 UI 渲染 ---
-class MockArxivResult:
+# --- 修改点 1：将 MockArxivResult 更名为 SSResult，彻底移除内部 arxiv 判断逻辑 ---
+class SSResult:
     def __init__(self, ss_data):
         self.title = ss_data.get('title') or '无标题'
-        # 伪装 authors 列表，让 a.name 可以正常调用
         self.authors = [type('Author', (), {'name': a.get('name', '未知作者')}) for a in ss_data.get('authors', [])]
         
-        # 处理时间格式兼容
         pub_date = ss_data.get('publicationDate')
         if pub_date:
             try:
@@ -147,19 +145,12 @@ class MockArxivResult:
             
         self.summary = ss_data.get('abstract') or "该论文暂无摘要信息。"
         
-        # 链接处理：优先用 ArXiv 原生链接，没有就用 SS 链接
-        ext_ids = ss_data.get('externalIds', {})
-        arxiv_id = ext_ids.get('ArXiv')
-        if arxiv_id:
-            self.entry_id = f"https://arxiv.org/abs/{arxiv_id}"
-        else:
-            self.entry_id = ss_data.get('url') or f"https://www.semanticscholar.org/paper/{ss_data.get('paperId')}"
-            
-        self.ss_paper_id = ss_data.get('paperId')
+        self.paper_id = ss_data.get('paperId')
+        self.url = ss_data.get('url') or f"https://www.semanticscholar.org/paper/{self.paper_id}"
         self.open_access_pdf = ss_data.get('openAccessPdf') or {}
         self.citation_count = ss_data.get('citationCount', 0)
 
-# --- 修改点 2：新增 SS API 专属生成器，完全替代原来的 arxiv.Search().results() ---
+# --- 修改点 2：生成器内部实例化更名为 SSResult ---
 def ss_search_generator(query, api_key, sort_mode):
     offset = 0
     limit = 50
@@ -172,7 +163,6 @@ def ss_search_generator(query, api_key, sort_mode):
             "limit": limit,
             "fields": "title,authors,year,publicationDate,abstract,externalIds,url,openAccessPdf,citationCount"
         }
-        # SS 排序映射
         if "最新" in sort_mode:
             params["sort"] = "publicationDate:desc"
         elif "引用量" in sort_mode:
@@ -184,9 +174,8 @@ def ss_search_generator(query, api_key, sort_mode):
                 data = r.json().get('data', [])
                 if not data: break
                 for item in data:
-                    yield MockArxivResult(item)
+                    yield SSResult(item)
                 
-                # 如果超出了总数或 API 最大便宜限制，停止
                 if offset + limit >= r.json().get('total', 0) or offset >= 9900:
                     break
                 offset += limit
@@ -199,19 +188,9 @@ def ss_search_generator(query, api_key, sort_mode):
             st.warning(f"搜索发生异常: {e}")
             break
 
-# --- 修改点 3：增强 PDF 下载逻辑，保留原来 ArXiv 直链的同时，支持 SS 的免费 PDF 链接 ---
-def download_arxiv_pdf_direct(url_or_id, open_access_url=None):
-    # 如果是 ArXiv 的，继续严格按照历史要求拼接原生直链
-    if "arxiv.org" in url_or_id or re.match(r'^\d{4}\.\d{4,5}', url_or_id):
-        clean_id = get_pure_arxiv_id(url_or_id)
-        pdf_url = f"https://arxiv.org/pdf/{clean_id}.pdf"
-        pdf_path = os.path.join(tempfile.gettempdir(), f"{clean_id}.pdf")
-        r = requests.get(pdf_url, timeout=15)
-        with open(pdf_path, 'wb') as f:
-            f.write(r.content)
-        return pdf_path
-    # 如果不是 ArXiv，尝试使用 SS 给的免费开源下载链接
-    elif open_access_url:
+# --- 修改点 3：移除所有关于 arxiv 的拼接判定，纯净采用 SS 开源 PDF 下载逻辑 ---
+def download_pdf_direct(open_access_url):
+    if open_access_url:
         pdf_path = os.path.join(tempfile.gettempdir(), f"ss_pdf_{uuid.uuid4().hex[:8]}.pdf")
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(open_access_url, headers=headers, timeout=20)
@@ -219,7 +198,7 @@ def download_arxiv_pdf_direct(url_or_id, open_access_url=None):
             f.write(r.content)
         return pdf_path
     else:
-        raise Exception("该论文既非 ArXiv 论文，也无 Semantic Scholar 开源 PDF 链接，暂不支持一键下载。")
+        raise Exception("该论文无 Semantic Scholar 开源 PDF 链接，暂不支持一键下载。")
 
 def get_deepseek_llm(api_key, temperature=0.1):
     if not api_key:
@@ -238,10 +217,7 @@ def get_embeddings_model():
 def active_topic_data():
     return st.session_state.topics[st.session_state.active_topic]
 
-def get_pure_arxiv_id(url_or_id):
-    m = re.search(r'(\d{4}\.\d{4,5})', url_or_id)
-    return m.group(1) if m else url_or_id.split('/')[-1].split('v')[0]
-
+# --- 修改点 4：导出 Excel 取用统一的 url ---
 def convert_to_excel(results):
     data = []
     for item in results:
@@ -253,7 +229,7 @@ def convert_to_excel(results):
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
             "核心贡献 (AI)": contrib,
-            "链接": res.entry_id,
+            "链接": res.url,
             "摘要": res.summary.replace('\n', ' ')
         })
     
@@ -299,87 +275,84 @@ def auto_batch_contributions(results, api_key, limit=50):
             except:
                 pass
 
+# --- 修改点 5：彻底改造旧的引用拉取缓存系统，使其基于原生的 paper_id ---
 @st.cache_data(ttl=1800)
-def fetch_citations_batch_cached(arxiv_ids_tuple: tuple, ss_key=None) -> dict:
-    clean_ids = [f"ArXiv:{get_pure_arxiv_id(aid)}" for aid in arxiv_ids_tuple]
+def fetch_citations_batch_cached(paper_ids_tuple: tuple, ss_key=None) -> dict:
     url = "https://api.semanticscholar.org/graph/v1/paper/batch"
     headers = {"x-api-key": ss_key} if ss_key else {}
     try:
         r = requests.post(url, headers=headers,
-                          params={"fields": "citationCount,externalIds"},
-                          json={"ids": clean_ids}, timeout=15)
+                          params={"fields": "citationCount"},
+                          json={"ids": list(paper_ids_tuple)}, timeout=15)
         if r.status_code == 200:
             out = {}
             for item in r.json():
-                if item and item.get("externalIds"):
-                    aid = item["externalIds"].get("ArXiv","")
-                    if aid:
-                        out[aid] = item.get("citationCount", 0)
+                if item and item.get("paperId"):
+                    out[item["paperId"]] = item.get("citationCount", 0)
             return out
     except Exception as e:
         st.warning(f"批量引用数获取异常，降级: {e}")
     return {}
 
 def fetch_one_citation(args):
-    arxiv_id, ss_key = args
+    paper_id, ss_key = args
     try:
-        url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{get_pure_arxiv_id(arxiv_id)}?fields=citationCount"
+        url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}?fields=citationCount"
         headers = {"x-api-key": ss_key} if ss_key else {}
         r = requests.get(url, headers=headers, timeout=6)
         if r.status_code == 200:
-            return arxiv_id, r.json().get('citationCount', 0)
+            return paper_id, r.json().get('citationCount', 0)
     except: pass
-    return arxiv_id, 0
+    return paper_id, 0
 
 def fetch_citations_parallel(results, ss_key=None):
-    args_list = [(item['obj'].entry_id, ss_key) for item in results]
+    args_list = [(item['obj'].paper_id, ss_key) for item in results]
     out = {}
     with ThreadPoolExecutor(max_workers=8 if ss_key else 3) as pool:
         for future in as_completed({pool.submit(fetch_one_citation, a): a[0] for a in args_list}):
-            aid, count = future.result()
-            out[aid] = count
+            pid, count = future.result()
+            out[pid] = count
     return out
 
 def smart_fetch_citations(results, ss_key=None):
     cache = st.session_state.citations_global_cache
-    missing = [item for item in results if get_pure_arxiv_id(item['obj'].entry_id) not in cache]
+    missing = [item for item in results if item['obj'].paper_id not in cache]
     hits = len(results) - len(missing)
     if hits:
         st.caption(f"⚡ {hits} 篇命中缓存，{len(missing)} 篇需请求")
     if missing:
-        ids = tuple(item['obj'].entry_id for item in missing)
+        ids = tuple(item['obj'].paper_id for item in missing)
         new_data = fetch_citations_batch_cached(ids, ss_key)
         if not new_data:
-            new_data = {get_pure_arxiv_id(k): v
-                        for k, v in fetch_citations_parallel(missing, ss_key).items()}
+            new_data = {k: v for k, v in fetch_citations_parallel(missing, ss_key).items()}
         cache.update(new_data)
-    return {item['obj'].entry_id: cache.get(get_pure_arxiv_id(item['obj'].entry_id), 0)
+    return {item['obj'].paper_id: cache.get(item['obj'].paper_id, 0)
             for item in results}
 
 def preload_top_graphs(results, ss_key=None, top_n=3):
     done = st.session_state.preload_done_ids
     to_do = [item for item in sorted(results, key=lambda x: x.get("citations") or 0, reverse=True)[:top_n]
-             if item['obj'].entry_id not in done]
+             if item['obj'].paper_id not in done]
     if not to_do: return
     ph = st.empty()
     ph.caption(f"🔄 后台预加载 Top {len(to_do)} 图谱…")
     for item in to_do:
-        fetch_graph_data(item['obj'].entry_id, ss_key=ss_key)
-        done.add(item['obj'].entry_id)
+        fetch_graph_data(item['obj'].paper_id, ss_key=ss_key)
+        done.add(item['obj'].paper_id)
         time.sleep(0.3)
     ph.caption("✅ 图谱预加载完成")
 
+# --- 修改点 6：修复图谱报错核心！将 ArXiv 拼接剔除，直接使用 paper_id 检索；并追加 openAccessPdf 字段 ---
 @st.cache_data(ttl=3600)
-def fetch_graph_data(arxiv_id, ss_key=None):
-    clean_id = get_pure_arxiv_id(arxiv_id)
+def fetch_graph_data(paper_id, ss_key=None):
     fields = (
-        "paperId,title,year,citationCount,abstract,"
+        "paperId,title,year,citationCount,abstract,url,openAccessPdf,"
         "references.paperId,references.title,references.citationCount,"
-        "references.year,references.abstract,references.externalIds,"
+        "references.year,references.abstract,references.url,references.openAccessPdf,"
         "citations.paperId,citations.title,citations.citationCount,"
-        "citations.year,citations.abstract,citations.externalIds"
+        "citations.year,citations.abstract,citations.url,citations.openAccessPdf"
     )
-    url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields={fields}"
+    url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}?fields={fields}"
     headers = {"x-api-key": ss_key} if ss_key else {}
     for attempt in range(3):
         try:
@@ -420,13 +393,13 @@ def get_one_line_contribution(abstract, title, api_key):
     st.session_state.contributions_cache[key] = result
     return result
 
-def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
+# --- 修改点 7：直接传入 paper_id 获取评分数据 ---
+def get_paper_score(paper_id, title, abstract, api_key, ss_key):
     key = title[:60]
     if key in st.session_state.score_cache:
         return st.session_state.score_cache[key]
     try:
-        clean_id = get_pure_arxiv_id(arxiv_id)
-        url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount"
+        url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}?fields=tldr,influentialCitationCount"
         headers = {"x-api-key": ss_key} if ss_key else {}
         ss_info = ""
         try:
@@ -512,7 +485,6 @@ def get_gap_recommendations():
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
 # ── 关键词追踪 ──
-# --- 修改点 4：追踪器也替换为底层调用 SS 接口 ---
 def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
     try:
         cutoff = datetime.fromisoformat(since_date) if since_date else datetime.now() - timedelta(days=7)
@@ -529,14 +501,15 @@ def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
         out = []
         if r.status_code == 200:
             for item in r.json().get('data', []):
-                mock_res = MockArxivResult(item)
+                mock_res = SSResult(item)
                 if mock_res.published.replace(tzinfo=None) > cutoff:
                     out.append({
                         "title":     mock_res.title,
                         "authors":   ", ".join([a.name for a in mock_res.authors]),
                         "published": mock_res.published.strftime("%Y-%m-%d"),
                         "summary":   mock_res.summary,
-                        "entry_id":  mock_res.entry_id,
+                        "paper_id":  mock_res.paper_id,
+                        "url":       mock_res.url,
                         "obj":       mock_res,
                     })
         return out
@@ -556,7 +529,7 @@ def tracker_run_all(force=False):
                 total += len(data.get("new_papers",[])); continue
         new = tracker_check_one(kw, since_date=data.get("last_checked"))
         seen = set(data.get("seen_ids",[]))
-        truly_new = [p for p in new if p["entry_id"] not in seen]
+        truly_new = [p for p in new if p["paper_id"] not in seen]
         data["new_papers"]   = truly_new + data.get("new_papers",[])
         data["last_checked"] = now.isoformat(timespec="seconds")
         total += len(data["new_papers"])
@@ -564,7 +537,7 @@ def tracker_run_all(force=False):
 
 def tracker_mark_read(keyword: str):
     data = st.session_state.trackers.get(keyword, {})
-    for p in data.get("new_papers",[]): data.setdefault("seen_ids",[]).append(p["entry_id"])
+    for p in data.get("new_papers",[]): data.setdefault("seen_ids",[]).append(p["paper_id"])
     data["new_papers"] = []
     st.session_state.tracker_total_new = sum(
         len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
@@ -574,6 +547,7 @@ if st.session_state.trackers:
     tracker_run_all(force=False)
 
 # ================= 5. 图谱渲染 =================
+# --- 修改点 8：移除 ArXiv 关联，用 paper_id 映射关系，提供真实的 open_access_url 用于入库下载 ---
 def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, details = [], [], {}
@@ -592,8 +566,9 @@ def render_connected_graph(data, min_cite_filter=0):
         "abstract": data.get('abstract') or "无摘要",
         "year":     data.get('year','Unknown'),
         "cites":    data.get('citationCount',0),
-        "url":      f"https://www.semanticscholar.org/paper/{seed}",
-        "arxiv_id": None,
+        "url":      data.get('url') or f"https://www.semanticscholar.org/paper/{seed}",
+        "paper_id": seed,
+        "open_access_url": data.get('openAccessPdf', {}).get('url') if data.get('openAccessPdf') else None
     }
     nodes.append(Node(id=seed, label="THIS PAPER", size=35, color=color(data.get('year'),'seed')))
     seen = {seed}
@@ -610,17 +585,18 @@ def render_connected_graph(data, min_cite_filter=0):
         seen.add(pid)
         title    = item.get('title','Unknown')
         year     = item.get('year')
-        ext      = item.get('externalIds') or {}
-        arxiv_id = ext.get('ArXiv')
+        open_access_url = item.get('openAccessPdf', {}).get('url') if item.get('openAccessPdf') else None
+        
         details[pid] = {
             "title":    title,
             "abstract": item.get('abstract') or "暂无摘要",
             "year":     year, "cites": cites,
-            "url":      f"https://www.semanticscholar.org/paper/{pid}",
-            "arxiv_id": arxiv_id,
+            "url":      item.get('url') or f"https://www.semanticscholar.org/paper/{pid}",
+            "paper_id": pid,
+            "open_access_url": open_access_url
         }
-        if item['rel_type']=='ref' and arxiv_id:
-            refs_for_gap.append({"title":title,"arxiv_id":arxiv_id,"abstract":item.get('abstract','')})
+        if item['rel_type']=='ref' and pid:
+            refs_for_gap.append({"title":title,"paper_id":pid,"abstract":item.get('abstract','')})
         sz = 15 + math.log(cites+1)*3.5
         nodes.append(Node(id=pid, label=f"{title[:20]}…", size=sz, color=color(year, item['rel_type'])))
         if item['rel_type']=='cite':
@@ -720,12 +696,10 @@ with tab_main:
     if st.button("🚀 检索", use_container_width=True) and search_query:
         with st.spinner("检索论文中 (使用 Semantic Scholar)..."):
             try:
-                # --- 修改点 5：彻底使用刚刚写好的 SS 生成器，丢弃 arxiv.Search ---
                 raw_gen = ss_search_generator(search_query, ss_api_key, sort_mode)
                 st.session_state.search_generator = raw_gen
                 raw = list(itertools.islice(raw_gen, 50))
                 
-                # 因为 SS API 已经携带了 citationCount，我们可以直接填入
                 st.session_state.search_results = [{"obj":r, "citations": r.citation_count} for r in raw]
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
@@ -735,11 +709,6 @@ with tab_main:
         if st.session_state.search_results:
             t0 = time.time()
             with st.spinner("处理数据展示..."):
-                # --- 修改点 6：不删除你的老代码，通过注释安全跳过。因为 SS 自带引用数，无需再二次请求了 ---
-                # id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                # for item in st.session_state.search_results:
-                #     item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
                 
@@ -761,8 +730,6 @@ with tab_main:
             with gc_graph:
                 clicked_id, all_details = render_connected_graph(g_data, min_cite_filter=min_cf)
                 sid = g_data.get('paperId','root')
-                if sid in all_details:
-                    all_details[sid]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
                 if not (clicked_id and clicked_id in all_details):
                     st.caption("👆 点击节点 → 右侧看完整详情 | 🔴 当前  🟢 引用本文  🔵 本文引用")
 
@@ -800,22 +767,22 @@ with tab_main:
                         index=list(st.session_state.topics.keys()).index(st.session_state.active_topic),
                         key="graph_topic_sel", label_visibility="collapsed"
                     )
-                    arxiv_id = info.get('arxiv_id')
+                    open_access_url = info.get('open_access_url')
                     ga,gb,gc = st.columns(3)
                     with ga:
-                        if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
+                        if open_access_url and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
                             with st.spinner("下载中..."):
                                 try:
-                                    pdf_path = download_arxiv_pdf_direct(arxiv_id)
+                                    pdf_path = download_pdf_direct(open_access_url)
                                     if process_and_add_to_topic(pdf_path, info['title'], user_api_key, topic_name=target_topic):
                                         st.success("✅ 入库成功！"); st.balloons()
                                 except Exception as e: st.error(str(e))
-                        elif not arxiv_id: st.caption("暂无全文")
+                        elif not open_access_url: st.caption("暂无免费全文")
                     with gb:
                         st.link_button("🌐 SS", info['url'], use_container_width=True)
                     with gc:
-                        if info.get('arxiv_id') and st.button("🕸️ 展开", use_container_width=True, key="ginfo_expand"):
-                            st.session_state.focus_paper_id = info['arxiv_id']; st.rerun()
+                        if info.get('paper_id') and st.button("🕸️ 展开", use_container_width=True, key="ginfo_expand"):
+                            st.session_state.focus_paper_id = info['paper_id']; st.rerun()
                 else:
                     st.markdown(
                         """<div style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:10px;
@@ -836,7 +803,7 @@ with tab_main:
         st.download_button(
             label="📥 点击下载当前已加载论文 (Excel)",
             data=convert_to_excel(st.session_state.search_results),
-            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            file_name=f"SS_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.markdown("---")
@@ -873,25 +840,24 @@ with tab_main:
                         st.rerun()
                 with cs:
                     if st.button("⭐ 打分", key=f"score_{i}"):
-                        with st.spinner("获取SS数据并打分..."): get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
+                        with st.spinner("获取SS数据并打分..."): get_paper_score(res.paper_id, res.title, res.summary, user_api_key, ss_api_key)
                         st.rerun()
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
-                # --- 修改点 7：把写死的 ArXiv 文字改成了通用“来源”，因为部分来自 SS 纯净库 ---
-                with b1: st.markdown(f"[🔗 原文来源]({res.entry_id})")
+                # --- 修改点 9：全部替换为原生统一的 res.url ---
+                with b1: st.markdown(f"[🔗 原文来源]({res.url})")
                 with b2:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
                         with st.spinner("下载解析..."):
                             try:
-                                # --- 修改点 8：将 SS 的 open_access 链接也传进去，如果不是 ArXiv 也能下载 ---
-                                pdf_path = download_arxiv_pdf_direct(res.entry_id, res.open_access_pdf.get('url'))
+                                pdf_path = download_pdf_direct(res.open_access_pdf.get('url'))
                                 process_and_add_to_topic(pdf_path, res.title, user_api_key)
                                 st.success("入库成功！")
                             except Exception as e: st.error(str(e))
                 with b3:
-                    lbl = "🕸️ 图谱 ⚡" if res.entry_id in st.session_state.preload_done_ids else "🕸️ 图谱"
+                    lbl = "🕸️ 图谱 ⚡" if res.paper_id in st.session_state.preload_done_ids else "🕸️ 图谱"
                     if st.button(lbl, key=f"graph_{i}"):
-                        st.session_state.focus_paper_id = res.entry_id; st.rerun()
+                        st.session_state.focus_paper_id = res.paper_id; st.rerun()
         
     if st.session_state.search_generator:
         st.markdown("---")
@@ -900,7 +866,6 @@ with tab_main:
                 more_raw = list(itertools.islice(st.session_state.search_generator, 50))
                 
                 if more_raw:
-                    # --- 修改点 9：加载更多时，也只需取生成器吐出来的 citation_count ---
                     new_results = [{"obj": r, "citations": r.citation_count} for r in more_raw]
                     st.session_state.search_results.extend(new_results)
                     
@@ -1077,7 +1042,7 @@ with tab_read:
 # ══════════════════════════════════════════
 with tab_track:
     st.subheader("🔔 关键词追踪")
-    st.caption("添加关键词后，App 每次启动自动检查 arXiv，有新论文时 Tab 标题显示数量提醒。")
+    st.caption("添加关键词后，App 每次启动自动检查，有新论文时 Tab 标题显示数量提醒。")
 
     add1,add2,add3 = st.columns([3,1.2,1])
     with add1:
@@ -1156,22 +1121,21 @@ with tab_track:
                         """, unsafe_allow_html=True,
                     )
                     pb1,pb2,pb3 = st.columns([1,1,4])
-                    # --- 修改点 10：这里的 tracker 来源也改为了通用文字 ---
-                    with pb1: st.markdown(f"[🔗 原文来源]({paper['entry_id']})")
+                    # --- 修改点 10：统一使用 tracker 内部传入的 url 和 paper_id ---
+                    with pb1: st.markdown(f"[🔗 原文来源]({paper['url']})")
                     with pb2:
-                        if st.button("⬇️ 入库", key=f"tr_dl_{paper['entry_id']}"):
+                        if st.button("⬇️ 入库", key=f"tr_dl_{paper['paper_id']}"):
                             with st.spinner("下载中…"):
                                 try:
-                                    # --- 修改点 11：支持传递 SS 的开放下载链接，同时兼容你的 ArXiv 直链逻辑 ---
                                     obj = paper.get("obj")
                                     open_access_url = obj.open_access_pdf.get('url') if obj else None
-                                    pdf_path = download_arxiv_pdf_direct(paper['entry_id'], open_access_url)
+                                    pdf_path = download_pdf_direct(open_access_url)
                                     process_and_add_to_topic(pdf_path, paper['title'], user_api_key)
                                     st.success("已入库！")
                                 except Exception as e: st.error(str(e))
                     with pb3:
-                        if st.button("🕸️ 查图谱", key=f"tr_graph_{paper['entry_id']}"):
-                            st.session_state.focus_paper_id = paper['entry_id']; st.rerun()
+                        if st.button("🕸️ 查图谱", key=f"tr_graph_{paper['paper_id']}"):
+                            st.session_state.focus_paper_id = paper['paper_id']; st.rerun()
             else:
                 st.caption(f"暂无新论文 · 检查间隔：每 {data.get('check_interval_h',12)}h")
 
