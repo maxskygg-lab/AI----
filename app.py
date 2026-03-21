@@ -128,7 +128,6 @@ for k, v in defaults.items():
 
 # ================= 4. 工具函数 =================
 
-# --- 修改点 1：将 MockArxivResult 更名为 SSResult，彻底移除内部 arxiv 判断逻辑 ---
 class SSResult:
     def __init__(self, ss_data):
         self.title = ss_data.get('title') or '无标题'
@@ -150,7 +149,6 @@ class SSResult:
         self.open_access_pdf = ss_data.get('openAccessPdf') or {}
         self.citation_count = ss_data.get('citationCount', 0)
 
-# --- 修改点 2：生成器内部实例化更名为 SSResult ---
 def ss_search_generator(query, api_key, sort_mode):
     offset = 0
     limit = 50
@@ -188,7 +186,6 @@ def ss_search_generator(query, api_key, sort_mode):
             st.warning(f"搜索发生异常: {e}")
             break
 
-# --- 修改点 3：移除所有关于 arxiv 的拼接判定，纯净采用 SS 开源 PDF 下载逻辑 ---
 def download_pdf_direct(open_access_url):
     if open_access_url:
         pdf_path = os.path.join(tempfile.gettempdir(), f"ss_pdf_{uuid.uuid4().hex[:8]}.pdf")
@@ -217,7 +214,6 @@ def get_embeddings_model():
 def active_topic_data():
     return st.session_state.topics[st.session_state.active_topic]
 
-# --- 修改点 4：导出 Excel 取用统一的 url ---
 def convert_to_excel(results):
     data = []
     for item in results:
@@ -275,7 +271,6 @@ def auto_batch_contributions(results, api_key, limit=50):
             except:
                 pass
 
-# --- 修改点 5：彻底改造旧的引用拉取缓存系统，使其基于原生的 paper_id ---
 @st.cache_data(ttl=1800)
 def fetch_citations_batch_cached(paper_ids_tuple: tuple, ss_key=None) -> dict:
     url = "https://api.semanticscholar.org/graph/v1/paper/batch"
@@ -342,7 +337,6 @@ def preload_top_graphs(results, ss_key=None, top_n=3):
         time.sleep(0.3)
     ph.caption("✅ 图谱预加载完成")
 
-# --- 修改点 6：修复图谱报错核心！将 ArXiv 拼接剔除，直接使用 paper_id 检索；并追加 openAccessPdf 字段 ---
 @st.cache_data(ttl=3600)
 def fetch_graph_data(paper_id, ss_key=None):
     fields = (
@@ -393,7 +387,6 @@ def get_one_line_contribution(abstract, title, api_key):
     st.session_state.contributions_cache[key] = result
     return result
 
-# --- 修改点 7：直接传入 paper_id 获取评分数据 ---
 def get_paper_score(paper_id, title, abstract, api_key, ss_key):
     key = title[:60]
     if key in st.session_state.score_cache:
@@ -547,7 +540,6 @@ if st.session_state.trackers:
     tracker_run_all(force=False)
 
 # ================= 5. 图谱渲染 =================
-# --- 修改点 8：移除 ArXiv 关联，用 paper_id 映射关系，提供真实的 open_access_url 用于入库下载 ---
 def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, details = [], [], {}
@@ -555,17 +547,25 @@ def render_connected_graph(data, min_cite_filter=0):
 
     def color(year, rel):
         if not year or year == 'Unknown': return "#94a3b8"
-        age = max(0, cur_year - int(year))
+        try:
+            age = max(0, cur_year - int(year))
+        except (ValueError, TypeError):
+            return "#94a3b8"
+            
         if rel == 'seed': return "#FF4B4B"
         if rel == 'cite': return "#059669" if age<2 else "#10b981" if age<5 else "#6ee7b7"
         return "#2563eb" if age<2 else "#3b82f6" if age<5 else "#93c5fd"
 
-    seed = data.get('paperId','root')
+    seed = data.get('paperId')
+    if not seed:
+        seed = 'root'
+    seed = str(seed) # 强制转成纯字符串
+
     details[seed] = {
-        "title":    data.get('title','Seed Paper'),
+        "title":    data.get('title') or 'Seed Paper',
         "abstract": data.get('abstract') or "无摘要",
-        "year":     data.get('year','Unknown'),
-        "cites":    data.get('citationCount',0),
+        "year":     data.get('year') or 'Unknown',
+        "cites":    data.get('citationCount') or 0,
         "url":      data.get('url') or f"https://www.semanticscholar.org/paper/{seed}",
         "paper_id": seed,
         "open_access_url": data.get('openAccessPdf', {}).get('url') if data.get('openAccessPdf') else None
@@ -580,10 +580,13 @@ def render_connected_graph(data, min_cite_filter=0):
 
     for item in combined:
         pid   = item.get('paperId')
-        cites = item.get('citationCount',0) or 0
+        cites = item.get('citationCount') or 0
         if not pid or pid in seen or cites < min_cite_filter: continue
+        
+        pid = str(pid) # 强制转成纯字符串
         seen.add(pid)
-        title    = item.get('title','Unknown')
+        
+        title    = item.get('title') or 'Unknown'
         year     = item.get('year')
         open_access_url = item.get('openAccessPdf', {}).get('url') if item.get('openAccessPdf') else None
         
@@ -597,10 +600,16 @@ def render_connected_graph(data, min_cite_filter=0):
         }
         if item['rel_type']=='ref' and pid:
             refs_for_gap.append({"title":title,"paper_id":pid,"abstract":item.get('abstract','')})
-        sz = 15 + math.log(cites+1)*3.5
+            
+        # 核心防 TypeError：通过强制 int() 转换防止 PyArrow 在打包序列化时报错
+        sz = int(15 + math.log(cites+1)*3.5)
+        
+        # 核心防 TypeError：防 title 是 None 时导致字符串切片 [:20] 报错
         nodes.append(Node(id=pid, label=f"{title[:20]}…", size=sz, color=color(year, item['rel_type'])))
+        
+        # 核心防 TypeError：保证所有的 width 都是完全一致的浮点数格式 (1.0 vs 1.5)，防止强迫症的 PyArrow 报混合类型错
         if item['rel_type']=='cite':
-            edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1, dashed=True))
+            edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1.0, dashed=True))
         else:
             edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
 
@@ -844,7 +853,6 @@ with tab_main:
                         st.rerun()
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
-                # --- 修改点 9：全部替换为原生统一的 res.url ---
                 with b1: st.markdown(f"[🔗 原文来源]({res.url})")
                 with b2:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
@@ -1121,7 +1129,6 @@ with tab_track:
                         """, unsafe_allow_html=True,
                     )
                     pb1,pb2,pb3 = st.columns([1,1,4])
-                    # --- 修改点 10：统一使用 tracker 内部传入的 url 和 paper_id ---
                     with pb1: st.markdown(f"[🔗 原文来源]({paper['url']})")
                     with pb2:
                         if st.button("⬇️ 入库", key=f"tr_dl_{paper['paper_id']}"):
