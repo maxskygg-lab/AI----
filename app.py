@@ -643,9 +643,12 @@ with tab_main:
             category_options = {
                 "所有学科": "",
                 "计算机科学 (Computer Science)": "cs.*",
-                "物理学 (Physics)": "physics.*",
+                "物理学 (Physics)": "(physics.* OR astro-ph.* OR cond-mat.* OR gr-qc.* OR hep-ex.* OR hep-lat.* OR hep-ph.* OR hep-th.* OR nucl-ex.* OR nucl-th.* OR quant-ph.*)",
                 "数学 (Mathematics)": "math.*",
-                "电子工程 (Electrical Eng)": "eess.*",
+                "统计学 (Statistics)": "stat.*",
+                "电气工程与系统科学 (EESS)": "eess.*",
+                "定量生物学 (Quantitative Biology)": "q-bio.*",
+                "定量金融 (Quantitative Finance)": "q-fin.*",
                 "经济学 (Economics)": "econ.*"
             }
             selected_category = st.selectbox("学科分类过滤", list(category_options.keys()))
