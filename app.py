@@ -632,7 +632,7 @@ with tab_main:
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
-                                     placeholder="例如: education robot", label_visibility="collapsed")
+                                     placeholder="", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
@@ -653,7 +653,7 @@ with tab_main:
             }
             selected_category = st.selectbox("学科分类过滤", list(category_options.keys()))
         with adv2:
-            journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE")
+            journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE,ACM,CVPR,NIPS")
     # --- 新增代码结束 ---
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
@@ -676,7 +676,8 @@ with tab_main:
 
                 # 叠加期刊/杂志过滤 (ArXiv使用 jr: 字段表示 Journal Reference)
                 if journal_query.strip():
-                    refined += f" AND jr:\"{journal_query.strip()}\""
+                    val = journal_query.strip()
+                    refined += f' AND (jr:"{val}" OR co:"{val}")'
                 # --- 修改逻辑结束 ---
 
                 # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
