@@ -222,7 +222,7 @@ def auto_batch_contributions(results, api_key, limit=50):
 
 @st.cache_data(ttl=1800)
 def fetch_citations_batch_cached(arxiv_ids_tuple: tuple, ss_key=None) -> dict:
-    clean_ids = [f"ArXiv:{get_pure_arxiv_id(aid)}" for aid in arxiv_ids_tuple]
+    clean_ids = [f"ArXiv:{get_pure_arxiv_id(arxiv_id)}" for arxiv_id in arxiv_ids_tuple]
     url = "https://api.semanticscholar.org/graph/v1/paper/batch"
     headers = {"x-api-key": ss_key} if ss_key else {}
     try:
@@ -636,15 +636,46 @@ with tab_main:
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
 
+    # --- 新增代码开始：按分类、期刊搜索的高级面板 ---
+    with st.expander("⚙️ 高级筛选 (学科/期刊)"):
+        adv1, adv2 = st.columns(2)
+        with adv1:
+            category_options = {
+                "所有学科": "",
+                "计算机科学 (Computer Science)": "cs.*",
+                "物理学 (Physics)": "physics.*",
+                "数学 (Mathematics)": "math.*",
+                "电子工程 (Electrical Eng)": "eess.*",
+                "经济学 (Economics)": "econ.*"
+            }
+            selected_category = st.selectbox("学科分类过滤", list(category_options.keys()))
+        with adv2:
+            journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE")
+    # --- 新增代码结束 ---
+
     if st.button("🚀 检索", use_container_width=True) and search_query:
         with st.spinner("检索论文中..."):
             try:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                
+                # --- 修改逻辑开始：安全的检索词拼接 ---
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()])
-                
+                    # 保留原有的多词匹配逻辑，但用括号包裹以确保优先级正确
+                    refined = "(" + " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()]) + ")"
+                else:
+                    refined = f"({refined})"
+
+                # 叠加学科过滤 (ArXiv使用 cat: 字段)
+                if category_options[selected_category]:
+                    refined += f" AND cat:{category_options[selected_category]}"
+
+                # 叠加期刊/杂志过滤 (ArXiv使用 jr: 字段表示 Journal Reference)
+                if journal_query.strip():
+                    refined += f" AND jr:\"{journal_query.strip()}\""
+                # --- 修改逻辑结束 ---
+
                 # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
                 raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
                 st.session_state.search_generator = raw_gen
