@@ -21,7 +21,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
-st.set_page_config(page_title="AI 深度研读助手 (DeepSeek版)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="AI 深度研读助手", layout="wide", page_icon="🎓")
 st.markdown("""
 <style>
     .stButton>button { width:100%; border-radius:8px; }
