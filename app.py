@@ -634,7 +634,8 @@ with tab_main:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="", label_visibility="collapsed")
     with sq2:
-        sort_mode = st.selectbox("排序",["🔥 相关性","📅 最新","📈 引用量"], label_visibility="collapsed")
+        # --- 修改点1：在排序下拉菜单中增加“🌟 综合(相关+质量)” ---
+        sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "📅 最新", "📈 引用量"], label_visibility="collapsed")
 
     # --- 新增代码开始：按分类、期刊搜索的高级面板 ---
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
@@ -703,6 +704,22 @@ with tab_main:
                 # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                # --- 修改点2开始：新增综合排序计算逻辑 ---
+                elif "综合" in sort_mode:
+                    import math
+                    max_items = len(st.session_state.search_results)
+                    for idx, item in enumerate(st.session_state.search_results):
+                        # (1) 相关性基准分：利用ArXiv默认返回的索引顺序倒推，第一名100分
+                        rel_score = ((max_items - idx) / max_items) * 100 if max_items > 0 else 0
+                        # (2) 质量基准分：使用引用量作为质量代理指标，对数平滑(假设约1000引用=满分100分)
+                        cites = item["citations"] or 0
+                        quality_score = min(100.0, (math.log10(cites + 1) / 3.0) * 100)
+                        # (3) 计算 Total Score (权重设定：相关性60%，质量40%)
+                        item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                    
+                    # 依据计算出的加权总分降序重排
+                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                # --- 修改点2结束 ---
                 
                 # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
                 # 确保 USER_API_KEY 已在 secrets 或上方定义
