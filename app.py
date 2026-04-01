@@ -623,7 +623,6 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
-# ══════════════════════════════════════════
 # Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
@@ -718,17 +717,26 @@ with tab_main:
                 # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                # --- 修改点2开始：新增综合排序计算逻辑 ---
+                # --- 修改点2开始：新增综合排序计算逻辑（引入阶梯式相关性） ---
                 elif "综合" in sort_mode:
                     import math
                     max_items = len(st.session_state.search_results)
                     for idx, item in enumerate(st.session_state.search_results):
-                        # (1) 相关性基准分：利用ArXiv默认返回的索引顺序倒推，第一名100分
-                        rel_score = ((max_items - idx) / max_items) * 100 if max_items > 0 else 0
+                        # (1) 阶梯式相关性基准分：打破线性衰减，让处于同一梯队的论文靠质量决胜
+                        if idx < 10:
+                            rel_score = 100  # 前10名均为极高相关，同起跑线
+                        elif idx < 20:
+                            rel_score = 85   # 11-20名为高相关
+                        elif idx < 30:
+                            rel_score = 70   # 21-30名为中等相关
+                        else:
+                            rel_score = 50   # 30名以后为基础相关
+
                         # (2) 质量基准分：使用引用量作为质量代理指标，对数平滑(假设约1000引用=满分100分)
                         cites = item["citations"] or 0
                         quality_score = min(100.0, (math.log10(cites + 1) / 3.0) * 100)
-                        # (3) 计算 Total Score (权重设定：相关性60%，质量40%)
+                        
+                        # (3) 计算 Total Score (权重保持：相关性60%，质量40%)
                         item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
                     
                     # 依据计算出的加权总分降序重排
@@ -823,7 +831,6 @@ with tab_main:
                         unsafe_allow_html=True,
                     )
 
-   
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
@@ -896,8 +903,6 @@ with tab_main:
                     if st.button(lbl, key=f"graph_{i}"):
                         st.session_state.focus_paper_id = res.entry_id; st.rerun()
         
-       # 这里的缩进必须与上方的 for 循环对齐
-        # 修改点：加载更多功能（自动分析前 50 篇）
     if st.session_state.search_generator:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
@@ -915,21 +920,38 @@ with tab_main:
                     for item in new_results:
                         item["citations"] = id2c.get(item['obj'].entry_id, 0)
                     
-                    # 3. 【核心新增】对这新加载的 50 篇立即进行 AI 批量分析
-                    # 确保 auto_batch_contributions 已在工具函数区定义
-                    # auto_batch_contributions(new_results, USER_API_KEY, limit=50)
-                    
                     # 4. 合并到全局搜索结果中
                     st.session_state.search_results.extend(new_results)
                     
-                    # 5. 如果当前是引用量排序模式，则重新全局排序
+                    # 5. 如果当前是引用量或综合排序模式，则重新全局排序
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    elif "综合" in sort_mode:
+                        import math
+                        max_items = len(st.session_state.search_results)
+                        for idx, item in enumerate(st.session_state.search_results):
+                            # 同步修改“加载更多”里的计算逻辑为阶梯式
+                            if idx < 10:
+                                rel_score = 100
+                            elif idx < 20:
+                                rel_score = 85
+                            elif idx < 30:
+                                rel_score = 70
+                            else:
+                                rel_score = 50
+                                
+                            cites = item["citations"] or 0
+                            quality_score = min(100.0, (math.log10(cites + 1) / 3.0) * 100)
+                            item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                            
+                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     
                     # 6. 刷新页面显示结果
                     st.rerun()
                 else:
                     st.info("✨ 到底啦，没有更多匹配的论文了。")
+   
+    
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
