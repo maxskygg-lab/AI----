@@ -623,6 +623,7 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
+# ══════════════════════════════════════════
 # Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
@@ -681,10 +682,23 @@ with tab_main:
                     refined += f' AND (jr:"{val}" OR co:"{val}")'
                 # --- 修改逻辑结束 ---
 
-                # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
-                raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
-                st.session_state.search_generator = raw_gen
-                raw = list(itertools.islice(raw_gen, 50))
+                # --- 修改点3开始：增加针对 429 报错的重试机制 ---
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
+                        raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                        st.session_state.search_generator = raw_gen
+                        raw = list(itertools.islice(raw_gen, 50))
+                        break # 如果请求成功，立刻跳出重试循环
+                    except Exception as e:
+                        # 检查错误信息中是否包含 429 状态码
+                        if "429" in str(e) and attempt < max_retries - 1:
+                            time.sleep(3) # 遇到 429 报错，强制让程序睡 3 秒钟再试
+                            continue
+                        else:
+                            raise e # 如果重试3次依然失败，或者报的不是429错，则抛出异常让下方捕捉
+                # --- 修改点3结束 ---
                 
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 st.session_state.citations_loaded = False
@@ -809,6 +823,7 @@ with tab_main:
                         unsafe_allow_html=True,
                     )
 
+   
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         # 修改点：显示“已加载”数量
