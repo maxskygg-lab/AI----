@@ -628,13 +628,16 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
+    # 修改点：移除了原本控制数量的组件，改为只占两列
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
-                                     placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
+                                     placeholder="", label_visibility="collapsed")
     with sq2:
+        # --- 修改点1：在排序下拉菜单中增加“🌟 综合(相关+质量)” ---
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "📅 最新", "📈 引用量"], label_visibility="collapsed")
 
+    # --- 新增代码开始：按分类、期刊搜索的高级面板 ---
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
         adv1, adv2 = st.columns(2)
         with adv1:
@@ -652,48 +655,49 @@ with tab_main:
             selected_category = st.selectbox("学科分类过滤", list(category_options.keys()))
         with adv2:
             journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE,ACM,CVPR,NIPS")
+    # --- 新增代码结束 ---
 
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("正在向 ArXiv 请求数据..."):
+        with st.spinner("检索论文中..."):
             try:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
-                # --- 修改点恢复：恢复您原本绝对精准的 AND 匹配逻辑 ---
+                # --- 修改逻辑开始：安全的检索词拼接 ---
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    # 保留原有的多词匹配逻辑，但用括号包裹以确保优先级正确
                     refined = "(" + " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()]) + ")"
                 else:
                     refined = f"({refined})"
 
+                # 叠加学科过滤 (ArXiv使用 cat: 字段)
                 if category_options[selected_category]:
                     refined += f" AND cat:{category_options[selected_category]}"
 
+                # 叠加期刊/杂志过滤 (ArXiv使用 jr: 字段表示 Journal Reference)
                 if journal_query.strip():
                     val = journal_query.strip()
                     refined += f' AND (jr:"{val}" OR co:"{val}")'
-                
-                # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
-                st.caption(f"🔍 检索指令预览: `{refined}`")
+                # --- 修改逻辑结束 ---
 
-                # --- 429 防崩溃重试机制 ---
+                # --- 修改点3开始：增加针对 429 报错的重试机制 ---
                 max_retries = 3
-                raw = []
                 for attempt in range(max_retries):
                     try:
+                        # 修改点：取消 max_results 限制，保存为 generator，并切取前 50 篇
                         raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
                         st.session_state.search_generator = raw_gen
                         raw = list(itertools.islice(raw_gen, 50))
-                        break 
+                        break # 如果请求成功，立刻跳出重试循环
                     except Exception as e:
+                        # 检查错误信息中是否包含 429 状态码
                         if "429" in str(e) and attempt < max_retries - 1:
-                            time.sleep(3)
+                            time.sleep(3) # 遇到 429 报错，强制让程序睡 3 秒钟再试
                             continue
-                        else: raise e
-                
-                # --- 新增辅助提示：针对零结果给出清晰引导 ---
-                if not raw:
-                    st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
+                        else:
+                            raise e # 如果重试3次依然失败，或者报的不是429错，则抛出异常让下方捕捉
+                # --- 修改点3结束 ---
                 
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 st.session_state.citations_loaded = False
@@ -703,32 +707,49 @@ with tab_main:
 
         if st.session_state.search_results:
             t0 = time.time()
+            # 修改点：合并 spinner 提示，让用户知道正在进行 AI 分析
             with st.spinner("同步引用数..."):
+                # 1. 获取引用数
                 id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
                 for item in st.session_state.search_results:
                     item["citations"] = id2c.get(item['obj'].entry_id, 0)
                 
+                # 2. 排序逻辑（如果是引用量排序）
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                # --- 阶梯式相关性计分与综合排序机制 ---
+                # --- 修改点2开始：新增综合排序计算逻辑（引入阶梯式相关性） ---
                 elif "综合" in sort_mode:
                     import math
                     max_items = len(st.session_state.search_results)
                     for idx, item in enumerate(st.session_state.search_results):
-                        if idx < 10: rel_score = 100
-                        elif idx < 20: rel_score = 85
-                        elif idx < 30: rel_score = 70
-                        else: rel_score = 50
+                        # (1) 阶梯式相关性基准分：打破线性衰减，让处于同一梯队的论文靠质量决胜
+                        if idx < 10:
+                            rel_score = 100  # 前10名均为极高相关，同起跑线
+                        elif idx < 20:
+                            rel_score = 85   # 11-20名为高相关
+                        elif idx < 30:
+                            rel_score = 70   # 21-30名为中等相关
+                        else:
+                            rel_score = 50   # 30名以后为基础相关
 
+                        # (2) 质量基准分：使用引用量作为质量代理指标，对数平滑(假设约1000引用=满分100分)
                         cites = item["citations"] or 0
                         quality_score = min(100.0, (math.log10(cites + 1) / 3.0) * 100)
+                        
+                        # (3) 计算 Total Score (权重保持：相关性60%，质量40%)
                         item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
                     
+                    # 依据计算出的加权总分降序重排
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                # --- 修改点2结束 ---
+                
+                # 3. 【新增核心调用】自动并行生成前 50 篇的核心贡献
+                # 确保 USER_API_KEY 已在 secrets 或上方定义
+                # auto_batch_contributions(st.session_state.search_results, USER_API_KEY, limit=50)
                 
                 st.session_state.citations_loaded = True
             
-            st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
+            st.success(f"✅ 首批 {len(st.session_state.search_results)} 篇完成，耗时 {time.time()-t0:.1f}s")
             preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
@@ -790,6 +811,7 @@ with tab_main:
                         if arxiv_id and st.button("⬇️ 入库", type="primary", use_container_width=True, key="ginfo_dl"):
                             with st.spinner("下载中..."):
                                 try:
+                                    # --- 修改点：直接使用 URL 下载，提速且符合历史要求 ---
                                     pdf_path = download_arxiv_pdf_direct(arxiv_id)
                                     if process_and_add_to_topic(pdf_path, info['title'], user_api_key, topic_name=target_topic):
                                         st.success("✅ 入库成功！"); st.balloons()
@@ -811,6 +833,7 @@ with tab_main:
 
     # ── 检索结果列表 ──
     if st.session_state.search_results:
+        # 修改点：显示“已加载”数量
         st.markdown(
             f'<div class="section-divider">📋 检索结果（已加载 {len(st.session_state.search_results)} 篇）'
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
@@ -831,12 +854,14 @@ with tab_main:
             cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
+                # 完整作者
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
                     f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
                     unsafe_allow_html=True
                 )
                 ck = res.title[:60]
+                # --- 修改点：增加打分列 ---
                 cc, cg, cs = st.columns([4,1,1])
                 with cc:
                     box_content = ""
@@ -844,19 +869,23 @@ with tab_main:
                         box_content += f"💡 <b>贡献:</b> {st.session_state.contributions_cache[ck]}<br>"
                     else:
                         box_content += "💡 <span style='color:#aaa;'>点击右侧 ✨ 生成核心贡献摘要</span><br>"
+                        
                     if ck in st.session_state.score_cache:
                         box_content += f"⭐ <b>评分:</b> {st.session_state.score_cache[ck]}"
                     else:
                         box_content += "⭐ <span style='color:#aaa;'>点击右侧 ⭐ 获取SS综合打分</span>"
+                        
                     st.markdown(f'<div class="contribution-box">{box_content}</div>', unsafe_allow_html=True)
                 with cg:
                     if st.button("✨ 摘要", key=f"contrib_{i}"):
                         with st.spinner("分析..."): get_one_line_contribution(res.summary, res.title, user_api_key)
                         st.rerun()
                 with cs:
+                    # --- 修改点：新增打分按钮逻辑 ---
                     if st.button("⭐ 打分", key=f"score_{i}"):
                         with st.spinner("获取SS数据并打分..."): get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
                         st.rerun()
+                # 完整摘要，不截断
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
                 with b1: st.markdown(f"[🔗 ArXiv]({res.entry_id})")
@@ -864,6 +893,7 @@ with tab_main:
                     if st.button("⬇️ 下载入库", key=f"dl_{i}"):
                         with st.spinner("下载解析..."):
                             try:
+                                # --- 修改点：直接使用 URL 下载 ---
                                 pdf_path = download_arxiv_pdf_direct(res.entry_id)
                                 process_and_add_to_topic(pdf_path, res.title, user_api_key)
                                 st.success("入库成功！")
@@ -876,41 +906,63 @@ with tab_main:
     if st.session_state.search_generator:
         st.markdown("---")
         if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+            # 统一提示语
             with st.spinner("正在拉取新论文摘要..."):
+                # 从 generator 中切取下 50 篇
                 more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                
                 if more_raw:
+                    # 1. 封装新结果
                     new_results = [{"obj": r, "citations": None} for r in more_raw]
+                    
+                    # 2. 获取引用数 (确保 ss_api_key 变量在上下文已定义)
                     id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
                     for item in new_results:
                         item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                    
+                    # 4. 合并到全局搜索结果中
                     st.session_state.search_results.extend(new_results)
                     
+                    # 5. 如果当前是引用量或综合排序模式，则重新全局排序
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
                     elif "综合" in sort_mode:
                         import math
                         max_items = len(st.session_state.search_results)
                         for idx, item in enumerate(st.session_state.search_results):
-                            if idx < 10: rel_score = 100
-                            elif idx < 20: rel_score = 85
-                            elif idx < 30: rel_score = 70
-                            else: rel_score = 50
+                            # 同步修改“加载更多”里的计算逻辑为阶梯式
+                            if idx < 10:
+                                rel_score = 100
+                            elif idx < 20:
+                                rel_score = 85
+                            elif idx < 30:
+                                rel_score = 70
+                            else:
+                                rel_score = 50
+                                
                             cites = item["citations"] or 0
                             quality_score = min(100.0, (math.log10(cites + 1) / 3.0) * 100)
                             item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                            
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    
+                    # 6. 刷新页面显示结果
                     st.rerun()
                 else:
-                    st.info("✨ 到底啦。")
-
+                    st.info("✨ 到底啦，没有更多匹配的论文了。")
+   
+    
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
 with tab_read:
+    # --- 1. 顶部控制栏：精准控制 Scope ---
     t = active_topic_data()
     
+    # 布局：左侧选模式，右侧状态显示
     c_ctrl, c_info = st.columns([2, 3])
     with c_ctrl:
+        # 核心修改：明确的范围选择，不再默认全库检索
         scope_options = ["🌐 全库综合 (对比/综述)"] + t["files"]
         selected_scope = st.selectbox(
             "📚 阅读范围 (Scope)", 
@@ -919,6 +971,7 @@ with tab_read:
             help="选择“全库”进行跨论文对比；选择“单篇”将只检索该论文内容，更省 Token 且更精准。"
         )
     with c_info:
+        # 显示当前 Token 使用情况预估或入库状态
         if selected_scope == "🌐 全库综合 (对比/综述)":
             st.caption(f"🚀 当前模式：检索所有 {len(t['files'])} 篇论文")
         else:
@@ -926,7 +979,9 @@ with tab_read:
 
     st.divider()
 
+    # --- 2. 聊天历史回显 (原生组件) ---
     if not st.session_state.chat_history:
+        # 欢迎引导语
         with st.chat_message("assistant"):
             st.markdown(f"👋 我是你的 DeepSeek 研读助手。当前主题库中有 **{len(t['files'])}** 篇论文。")
             if t["files"]:
@@ -936,23 +991,30 @@ with tab_read:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # --- 3. 聊天输入与处理 ---
     if prompt := st.chat_input("输入问题..."):
+        # 0. 检查是否有库
         if not t["db"]:
             st.error("请先在左侧上传 PDF 或从检索页下载论文入库！")
             st.stop()
 
+        # 1. 用户消息上屏
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        # 2. AI 生成回答
         with st.chat_message("assistant"):
+            # 占位符用于流式输出
             message_placeholder = st.empty()
             full_response = ""
             
             try:
+                # --- 核心优化 A：精准检索策略 ---
                 search_kwargs = {}
                 filter_rule = None
                 
+                # 如果选择了特定论文，构建 metadata 过滤器
                 if selected_scope != "🌐 全库综合 (对比/综述)":
                     filter_rule = {"source_paper": selected_scope}
                     search_kwargs = {"k": 20, "filter": filter_rule}
@@ -962,26 +1024,31 @@ with tab_read:
                     status_text = f"🔍 正在全库 {len(t['files'])} 篇论文中检索..."
 
                 with st.spinner(status_text):
+                    # 执行检索
                     if filter_rule:
                         docs = t["db"].similarity_search(prompt, **search_kwargs)
+                        # --- 修改点：单篇模式下，额外获取 SS 真实元数据以增强问答 ---
                         ss_data = fetch_ss_paper_details_by_title(selected_scope, ss_api_key)
                     else:
                         docs = t["db"].max_marginal_relevance_search(prompt, **search_kwargs)
                         ss_data = None
 
+                # --- 核心优化 B：构建更智能的 Prompt ---
                 if not docs:
                     full_response = "⚠️ 未在文档中检索到相关信息，请尝试更换关键词或检查文档是否完整。"
                     message_placeholder.markdown(full_response)
                 else:
+                    # 整理上下文，带上来源标记
                     context_text = ""
                     refs = []
                     for i, d in enumerate(docs):
                         src = d.metadata.get('source_paper', '未知')
-                        page = d.metadata.get('page', 0) + 1 
+                        page = d.metadata.get('page', 0) + 1 # PyPDFLoader通常从0开始
                         snippet = d.page_content.replace('\n', ' ')
                         context_text += f"[资料{i+1} | {src} (P{page})]: {snippet}\n\n"
                         refs.append(f"**[{i+1}] {src} (P{page})**: {snippet[:100]}...")
                         
+                    # --- 修改点：如果获取到了 SS 真实数据，注入给 LLM ---
                     ss_context = ""
                     if ss_data:
                         tldr = ss_data.get('tldr', {}).get('text', '无') if ss_data.get('tldr') else '无'
@@ -996,6 +1063,7 @@ with tab_read:
                             f"**指令**：你在回答背景、影响力和核心结论时，必须优先以这部分的真实元数据为准，不要编造不存在的事实。\n"
                         )
 
+                    # 动态 System Prompt
                     if selected_scope != "🌐 全库综合 (对比/综述)":
                         sys_prompt = (
                             f"你正在辅助用户精读论文《{selected_scope}》。\n"
@@ -1015,6 +1083,7 @@ with tab_read:
                             "3. 保持客观中立。"
                         )
 
+                    # --- 核心优化 C：调用 DeepSeek (流式) ---
                     with st.expander("📚 查看 AI 参考的原文片段 (Sources)", expanded=False):
                         st.markdown("\n\n".join(refs))
 
@@ -1065,7 +1134,6 @@ with tab_read:
                 st.session_state.pending_note = None
                 st.toast("笔记保存成功！", icon="🎉")
                 st.rerun()
-
 # ══════════════════════════════════════════
 # Tab 3：关键词追踪
 # ══════════════════════════════════════════
@@ -1133,6 +1201,7 @@ with tab_track:
 
             if new_papers:
                 for paper in new_papers:
+                    # 完整标题、完整作者、完整摘要，不截断
                     st.markdown(
                         f"""
                         <div class="new-paper-card">
@@ -1155,6 +1224,7 @@ with tab_track:
                         if st.button("⬇️ 入库", key=f"tr_dl_{paper['entry_id']}"):
                             with st.spinner("下载中…"):
                                 try:
+                                    # --- 修改点：使用统一的高效直链下载函数 ---
                                     pdf_path = download_arxiv_pdf_direct(paper['entry_id'])
                                     process_and_add_to_topic(pdf_path, paper['title'], user_api_key)
                                     st.success("已入库！")
@@ -1203,7 +1273,7 @@ with tab_notes:
                     st.rerun()
             if note.get("question"):
                 st.markdown(f"**❓ {note['question']}**")
-            st.markdown(note["content"]) 
+            st.markdown(note["content"])   # 完整内容，不截断
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("---")
