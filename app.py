@@ -558,6 +558,68 @@ def render_connected_graph(data, min_cite_filter=0):
     clicked = agraph(nodes=nodes, edges=edges, config=cfg)
     return clicked, details
 
+# ================= 5. 图谱渲染 =================
+def render_connected_graph(data, min_cite_filter=0):
+    if not data: return None, {}
+    nodes, edges, details = [], [], {}
+    cur_year = 2026
+
+    def color(year, rel):
+        if not year or year == 'Unknown': return "#94a3b8"
+        age = max(0, cur_year - int(year))
+        if rel == 'seed': return "#FF4B4B"
+        if rel == 'cite': return "#059669" if age<2 else "#10b981" if age<5 else "#6ee7b7"
+        return "#2563eb" if age<2 else "#3b82f6" if age<5 else "#93c5fd"
+
+    seed = data.get('paperId','root')
+    details[seed] = {
+        "title":    data.get('title','Seed Paper'),
+        "abstract": data.get('abstract') or "无摘要",
+        "year":     data.get('year','Unknown'),
+        "cites":    data.get('citationCount',0),
+        "url":      f"https://www.semanticscholar.org/paper/{seed}",
+        "arxiv_id": None,
+    }
+    nodes.append(Node(id=seed, label="THIS PAPER", size=35, color=color(data.get('year'),'seed')))
+    seen = {seed}
+    refs_for_gap = []
+
+    combined = []
+    for p in data.get('references',[])[:20]: p['rel_type']='ref'; combined.append(p)
+    for p in data.get('citations',[])[:20]:  p['rel_type']='cite'; combined.append(p)
+
+    for item in combined:
+        pid   = item.get('paperId')
+        cites = item.get('citationCount',0) or 0
+        if not pid or pid in seen or cites < min_cite_filter: continue
+        seen.add(pid)
+        title    = item.get('title','Unknown')
+        year     = item.get('year')
+        ext      = item.get('externalIds') or {}
+        arxiv_id = ext.get('ArXiv')
+        details[pid] = {
+            "title":    title,
+            "abstract": item.get('abstract') or "暂无摘要",
+            "year":     year, "cites": cites,
+            "url":      f"https://www.semanticscholar.org/paper/{pid}",
+            "arxiv_id": arxiv_id,
+        }
+        if item['rel_type']=='ref' and arxiv_id:
+            refs_for_gap.append({"title":title,"arxiv_id":arxiv_id,"abstract":item.get('abstract','')})
+        sz = 15 + math.log(cites+1)*3.5
+        nodes.append(Node(id=pid, label=f"{title[:20]}…", size=sz, color=color(year, item['rel_type'])))
+        if item['rel_type']=='cite':
+            edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1, dashed=True))
+        else:
+            edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
+
+    st.session_state.graph_references_cache = refs_for_gap
+    cfg = Config(width="100%", height=560, directed=True, physics=True,
+                 nodeHighlightBehavior=True, highlightColor="#F7D154",
+                 d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
+    clicked = agraph(nodes=nodes, edges=edges, config=cfg)
+    return clicked, details
+
 # ================= 6. 侧边栏 =================
 with st.sidebar:
     st.header("🎛️ 控制台")
@@ -636,6 +698,7 @@ with tab_main:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
     with sq2:
+        # --- 修改点 1：在下拉菜单中增加 💎 质量优先 ---
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
 
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
@@ -713,24 +776,30 @@ with tab_main:
                 
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                # --- 修改点 2：新增 💎 质量优先 的严格计算逻辑（初始搜索时） ---
                 elif "质量优先" in sort_mode:
                     import math
                     current_year = datetime.now().year
-                    for item in st.session_state.search_results:
+                    for idx, item in enumerate(st.session_state.search_results):
+                        # 引入基础相关性兜底 (20%权重)，防止无关的超高引文霸榜
+                        if idx < 10: rel_score = 100
+                        elif idx < 20: rel_score = 85
+                        elif idx < 30: rel_score = 70
+                        else: rel_score = 50
+                        
                         cites = item["citations"] or 0
-                        # 核心质量分：对数平滑的引用得分
                         cite_score = (math.log10(cites + 1) / 3.0) * 100
+                        
                         pub_year = item['obj'].published.year
                         age = max(0, current_year - pub_year)
-                        
-                        # 年份保护：仅对近3年的新论文给予潜力补偿，防止0引用的好新文被埋没
                         time_bonus = 0
                         if age == 0: time_bonus = 40
                         elif age == 1: time_bonus = 20
                         elif age == 2: time_bonus = 10
                         
-                        # 抛弃ArXiv的基础相关性得分，完全按质量指标排列
-                        item["total_score"] = cite_score + time_bonus
+                        quality_score = min(100.0, cite_score + time_bonus)
+                        # 质量绝对主导(80%)，但必须有相关性(20%)作为约束
+                        item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                 # --- 修改点：优化综合排序的数学逻辑，加入年份补贴 ---
                 elif "综合" in sort_mode:
@@ -916,21 +985,28 @@ with tab_main:
                     
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    # --- 修改点 3：新增 💎 质量优先 的严格计算逻辑（加载更多时） ---
                     elif "质量优先" in sort_mode:
                         import math
                         current_year = datetime.now().year
-                        for item in st.session_state.search_results:
+                        for idx, item in enumerate(st.session_state.search_results):
+                            if idx < 10: rel_score = 100
+                            elif idx < 20: rel_score = 85
+                            elif idx < 30: rel_score = 70
+                            else: rel_score = 50
+                            
                             cites = item["citations"] or 0
                             cite_score = (math.log10(cites + 1) / 3.0) * 100
+                            
                             pub_year = item['obj'].published.year
                             age = max(0, current_year - pub_year)
-                            
                             time_bonus = 0
                             if age == 0: time_bonus = 40
                             elif age == 1: time_bonus = 20
                             elif age == 2: time_bonus = 10
                             
-                            item["total_score"] = cite_score + time_bonus
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     elif "综合" in sort_mode:
                         import math
