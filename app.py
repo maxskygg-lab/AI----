@@ -698,7 +698,6 @@ with tab_main:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
     with sq2:
-        # --- 修改点 1：在下拉菜单中增加 💎 质量优先 ---
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
 
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
@@ -725,10 +724,11 @@ with tab_main:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
-                # --- 修改点恢复：恢复您原本绝对精准的 AND 匹配逻辑 ---
+                # --- 修改点：强化关键词的精准匹配逻辑 ---
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    refined = "(" + " AND ".join([f'(ti:{w} OR abs:{w})' for w in search_query.split()]) + ")"
+                    # 将包含空格的词汇直接打上双引号，强制 ArXiv 进行精确的短语匹配
+                    refined = f'(ti:"{search_query}" OR abs:"{search_query}")'
                 else:
                     refined = f"({refined})"
 
@@ -776,7 +776,6 @@ with tab_main:
                 
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                # --- 修改点 2：新增 💎 质量优先 的严格计算逻辑（初始搜索时） ---
                 elif "质量优先" in sort_mode:
                     import math
                     current_year = datetime.now().year
@@ -801,7 +800,6 @@ with tab_main:
                         # 质量绝对主导(80%)，但必须有相关性(20%)作为约束
                         item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                # --- 修改点：优化综合排序的数学逻辑，加入年份补贴 ---
                 elif "综合" in sort_mode:
                     import math
                     current_year = datetime.now().year
@@ -985,7 +983,6 @@ with tab_main:
                     
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    # --- 修改点 3：新增 💎 质量优先 的严格计算逻辑（加载更多时） ---
                     elif "质量优先" in sort_mode:
                         import math
                         current_year = datetime.now().year
@@ -1010,7 +1007,6 @@ with tab_main:
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     elif "综合" in sort_mode:
                         import math
-                        # --- 修改点：在加载更多时同样应用时间补贴机制 ---
                         current_year = datetime.now().year
                         max_items = len(st.session_state.search_results)
                         for idx, item in enumerate(st.session_state.search_results):
