@@ -168,15 +168,12 @@ def convert_to_excel(results):
     for item in results:
         res = item['obj']
         contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
-        # --- 修改点：读取你在打分功能中存入的 score_cache ---
-        score = st.session_state.score_cache.get(res.title[:60], "未打分")
         data.append({
             "标题": res.title,
             "作者": ", ".join([a.name for a in res.authors]),
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
             "核心贡献 (AI)": contrib,
-            "综合评分 (AI)": score, # --- 修改点：将打分数据添加到导出的字典中 ---
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
@@ -197,10 +194,8 @@ def convert_to_excel(results):
         worksheet.set_column('B:B', 20, cell_fmt)
         worksheet.set_column('C:D', 10, num_fmt)
         worksheet.set_column('E:E', 50, cell_fmt)
-        # --- 修改点：新增了第F列用于显示评分，原来的链接和摘要往后顺延到G和H列 ---
         worksheet.set_column('F:F', 30, cell_fmt)
-        worksheet.set_column('G:G', 30, cell_fmt)
-        worksheet.set_column('H:H', 60, cell_fmt)
+        worksheet.set_column('G:G', 60, cell_fmt)
         
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_fmt)
@@ -667,11 +662,11 @@ with tab_main:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
-                # --- 修改点：强化关键词的精准匹配逻辑 ---
+                # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    # 将包含空格的词汇直接打上双引号，强制 ArXiv 进行精确的短语匹配
-                    refined = f'(ti:"{search_query}" OR abs:"{search_query}")'
+                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
+                    refined = " AND ".join([f'all:{w}' for w in search_query.split()])
                 else:
                     refined = f"({refined})"
 
@@ -690,9 +685,11 @@ with tab_main:
                 raw = []
                 for attempt in range(max_retries):
                     try:
-                        raw_gen = arxiv.Search(query=refined, sort_by=asort).results()
+                        # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
+                        raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
                         st.session_state.search_generator = raw_gen
-                        raw = list(itertools.islice(raw_gen, 50))
+                        # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
+                        raw = list(itertools.islice(raw_gen, 100))
                         break 
                     except Exception as e:
                         if "429" in str(e) and attempt < max_retries - 1:
@@ -914,9 +911,11 @@ with tab_main:
         
     if st.session_state.search_generator:
         st.markdown("---")
-        if st.button("🔽 加载更多 50 篇...", use_container_width=True):
+        # --- 修改点：按钮文案同步修改为 100 篇 ---
+        if st.button("🔽 加载更多 100 篇...", use_container_width=True):
             with st.spinner("正在拉取新论文摘要..."):
-                more_raw = list(itertools.islice(st.session_state.search_generator, 50))
+                # --- 修改点：每次额外拉取数量提升到 100 ---
+                more_raw = list(itertools.islice(st.session_state.search_generator, 100))
                 if more_raw:
                     new_results = [{"obj": r, "citations": None} for r in more_raw]
                     id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
