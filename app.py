@@ -1264,19 +1264,19 @@ with tab_track:
             badge      = (f"<span class='tracker-new-badge'>🆕 {n_new} 篇新论文</span>"
                           if n_new > 0 else "<span style='color:#94a3b8;font-size:.8em'>暂无新论文</span>")
 
-            st.markdown('<div class="tracker-card">', unsafe_allow_html=True)
-            th1,th2,th3,th4 = st.columns([3,2,1,1])
-            with th1: st.markdown(f"**🔑 {kw}** {badge}", unsafe_allow_html=True)
-            with th2: st.caption(f"🕐 上次: {last_chk[:16] if last_chk != '从未' else '从未'}")
-            with th3:
-                if st.button("✅ 标记已读", key=f"read_{kw}", use_container_width=True, disabled=(n_new==0)):
-                    tracker_mark_read(kw); st.rerun()
-            with th4:
-                if st.button("🗑️ 删除", key=f"del_track_{kw}", use_container_width=True):
-                    del st.session_state.trackers[kw]
-                    st.session_state.tracker_total_new = sum(
-                        len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
-                    ); st.rerun()
+            with st.container(border=True):
+                th1,th2,th3,th4 = st.columns([3,2,1,1])
+                with th1: st.markdown(f"**🔑 {kw}** {badge}", unsafe_allow_html=True)
+                with th2: st.caption(f"🕐 上次: {last_chk[:16] if last_chk != '从未' else '从未'}")
+                with th3:
+                    if st.button("✅ 标记已读", key=f"read_{kw}", use_container_width=True, disabled=(n_new==0)):
+                        tracker_mark_read(kw); st.rerun()
+                with th4:
+                    if st.button("🗑️ 删除", key=f"del_track_{kw}", use_container_width=True):
+                        del st.session_state.trackers[kw]
+                        st.session_state.tracker_total_new = sum(
+                            len(d.get("new_papers",[])) for d in st.session_state.trackers.values()
+                        ); st.rerun()
 
             if new_papers:
                 for paper in new_papers:
@@ -1314,7 +1314,6 @@ with tab_track:
             else:
                 st.caption(f"暂无新论文 · 检查间隔：每 {data.get('check_interval_h',12)}h")
 
-            st.markdown('</div>', unsafe_allow_html=True)
             st.markdown("")
 
 # ══════════════════════════════════════════
@@ -1339,8 +1338,8 @@ with tab_notes:
 
         st.caption(f"共 {len(filtered)} 条")
         for note in reversed(filtered):
-            st.markdown('<div class="note-card">', unsafe_allow_html=True)
-            h1,h2,h3 = st.columns([3,2,1])
+            with st.container(border=True):
+                h1,h2,h3 = st.columns([3,2,1])
             with h1:
                 st.markdown(f'<span class="topic-badge">🗂️ {note["topic"]}</span>', unsafe_allow_html=True)
                 for tag in note["tags"]:
@@ -1353,7 +1352,6 @@ with tab_notes:
             if note.get("question"):
                 st.markdown(f"**❓ {note['question']}**")
             st.markdown(note["content"])   # 完整内容，不截断
-            st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("---")
         if st.button("🗑️ 清空所有笔记", type="secondary"):
