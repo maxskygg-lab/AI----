@@ -560,68 +560,6 @@ def render_connected_graph(data, min_cite_filter=0):
     clicked = agraph(nodes=nodes, edges=edges, config=cfg)
     return clicked, details
 
-# ================= 5. 图谱渲染 =================
-def render_connected_graph(data, min_cite_filter=0):
-    if not data: return None, {}
-    nodes, edges, details = [], [], {}
-    cur_year = 2026
-
-    def color(year, rel):
-        if not year or year == 'Unknown': return "#94a3b8"
-        age = max(0, cur_year - int(year))
-        if rel == 'seed': return "#FF4B4B"
-        if rel == 'cite': return "#059669" if age<2 else "#10b981" if age<5 else "#6ee7b7"
-        return "#2563eb" if age<2 else "#3b82f6" if age<5 else "#93c5fd"
-
-    seed = data.get('paperId','root')
-    details[seed] = {
-        "title":    data.get('title','Seed Paper'),
-        "abstract": data.get('abstract') or "无摘要",
-        "year":     data.get('year','Unknown'),
-        "cites":    data.get('citationCount',0),
-        "url":      f"https://www.semanticscholar.org/paper/{seed}",
-        "arxiv_id": None,
-    }
-    nodes.append(Node(id=seed, label="THIS PAPER", size=35, color=color(data.get('year'),'seed')))
-    seen = {seed}
-    refs_for_gap = []
-
-    combined = []
-    for p in data.get('references',[])[:20]: p['rel_type']='ref'; combined.append(p)
-    for p in data.get('citations',[])[:20]:  p['rel_type']='cite'; combined.append(p)
-
-    for item in combined:
-        pid   = item.get('paperId')
-        cites = item.get('citationCount',0) or 0
-        if not pid or pid in seen or cites < min_cite_filter: continue
-        seen.add(pid)
-        title    = item.get('title','Unknown')
-        year     = item.get('year')
-        ext      = item.get('externalIds') or {}
-        arxiv_id = ext.get('ArXiv')
-        details[pid] = {
-            "title":    title,
-            "abstract": item.get('abstract') or "暂无摘要",
-            "year":     year, "cites": cites,
-            "url":      f"https://www.semanticscholar.org/paper/{pid}",
-            "arxiv_id": arxiv_id,
-        }
-        if item['rel_type']=='ref' and arxiv_id:
-            refs_for_gap.append({"title":title,"arxiv_id":arxiv_id,"abstract":item.get('abstract','')})
-        sz = 15 + math.log(cites+1)*3.5
-        nodes.append(Node(id=pid, label=f"{title[:20]}…", size=sz, color=color(year, item['rel_type'])))
-        if item['rel_type']=='cite':
-            edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1, dashed=True))
-        else:
-            edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
-
-    st.session_state.graph_references_cache = refs_for_gap
-    cfg = Config(width="100%", height=560, directed=True, physics=True,
-                 nodeHighlightBehavior=True, highlightColor="#F7D154",
-                 d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
-    clicked = agraph(nodes=nodes, edges=edges, config=cfg)
-    return clicked, details
-
 # ================= 6. 侧边栏 =================
 with st.sidebar:
     st.header("🎛️ 控制台")
@@ -917,22 +855,26 @@ with tab_main:
             unsafe_allow_html=True
         )
 
-        col_dl, col_batch = st.columns(2)
-        with col_dl:
+        # --- 修改点开始：将下载和打分按钮重构为三列，加入动态数量输入，并新增打包下载 PDF 功能 ---
+        col_excel, col_score, col_pdf = st.columns(3)
+        
+        with col_excel:
+            st.write("📊 **导出数据**")
             st.download_button(
-                label="📥 下载当前已加载论文 (Excel)",
+                label="📥 下载 Excel 表格",
                 data=convert_to_excel(st.session_state.search_results),
                 file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-        with col_batch:
-            if st.button("⭐ 批量打分 (前100篇)", use_container_width=True):
-                with st.spinner("🚀 正在后台并行请求 DeepSeek，请耐心等待..."):
-                    to_process = st.session_state.search_results[:100]
+
+        with col_score:
+            score_num = st.number_input("⭐ **打分数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(20, len(st.session_state.search_results)), step=1, key="batch_score_n")
+            if st.button(f"🚀 开始打分 (前 {score_num} 篇)", use_container_width=True):
+                with st.spinner(f"🚀 正在后台并行请求 DeepSeek 给前 {score_num} 篇打分，请耐心等待..."):
+                    to_process = st.session_state.search_results[:score_num]
                     pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.score_cache]
                     if pending:
-                        # 使用线程池加速请求，但在主线程中处理结果，防止 Streamlit 多线程上下文丢失
                         with ThreadPoolExecutor(max_workers=5) as pool:
                             futures = {
                                 pool.submit(get_paper_score, p['obj'].entry_id, p['obj'].title, p['obj'].summary, user_api_key, ss_api_key): p['obj'].title[:60] 
@@ -941,13 +883,48 @@ with tab_main:
                             for future in as_completed(futures):
                                 key = futures[future]
                                 try:
-                                    # 将获取到的打分结果安全地写回主线程的 session_state
                                     st.session_state.score_cache[key] = future.result()
                                 except Exception:
                                     st.session_state.score_cache[key] = "（打分失败）"
-                st.success("✅ 前100篇论文已打分完毕！现在导出的 Excel 也会包含分数了。")
+                st.success(f"✅ 前 {score_num} 篇论文已打分完毕！")
                 time.sleep(2)
                 st.rerun()
+                
+        with col_pdf:
+            dl_num = st.number_input("📦 **下载原文数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_n")
+            if st.button(f"🔄 打包 ZIP (前 {dl_num} 篇)", use_container_width=True):
+                with st.spinner(f"📥 正在从 ArXiv 提取前 {dl_num} 篇 PDF 并压缩，这可能需要几十秒，请勿刷新页面..."):
+                    import zipfile
+                    zip_buffer = io.BytesIO()
+                    to_dl = st.session_state.search_results[:dl_num]
+                    # 将下载下来的 PDF 写入到这一个 ZIP 缓冲包里
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for idx, item in enumerate(to_dl):
+                            res = item['obj']
+                            try:
+                                # 复用咱们已有的高效直链下载函数
+                                p_path = download_arxiv_pdf_direct(res.entry_id)
+                                # 清理文件名中的非法字符，防止解压时在 Windows/Mac 上报错
+                                safe_title = re.sub(r'[\\/*?:"<>|]', "", res.title)[:50]
+                                filename = f"{idx+1}_{safe_title}.pdf"
+                                zf.write(p_path, arcname=filename)
+                                os.remove(p_path) # 用完即删，保护服务器硬盘不被撑爆
+                            except Exception as e:
+                                pass # 如果某篇下载失败，直接跳过，保证其余的正常打包完毕
+                    st.session_state.ready_zip_data = zip_buffer.getvalue()
+                    st.session_state.ready_zip_name = f"ArXiv_PDFs_Top{dl_num}_{datetime.now().strftime('%m%d_%H%M')}.zip"
+            
+            # 如果缓存里有打好包的压缩文件，就弹出真实的下载按钮供你点击
+            if st.session_state.get("ready_zip_data"):
+                st.download_button(
+                    label="✅ 点击下载压缩包",
+                    data=st.session_state.ready_zip_data,
+                    file_name=st.session_state.ready_zip_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                    type="primary"
+                )
+        # --- 修改点结束 ---
         
         st.markdown("---")
         
