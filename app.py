@@ -168,12 +168,15 @@ def convert_to_excel(results):
     for item in results:
         res = item['obj']
         contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
+        # --- 修改点 1：在这里读取 session_state 中可能已经打好的分数 ---
+        score = st.session_state.score_cache.get(res.title[:60], "未打分")
         data.append({
             "标题": res.title,
             "作者": ", ".join([a.name for a in res.authors]),
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
             "核心贡献 (AI)": contrib,
+            "综合评分 (AI)": score,  # --- 修改点 1：将打分情况塞进 Excel 的行数据里 ---
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
@@ -194,8 +197,10 @@ def convert_to_excel(results):
         worksheet.set_column('B:B', 20, cell_fmt)
         worksheet.set_column('C:D', 10, num_fmt)
         worksheet.set_column('E:E', 50, cell_fmt)
+        # --- 修改点 1：新增第F列留给综合评分，把原来的G列、H列顺延排好防挤压 ---
         worksheet.set_column('F:F', 30, cell_fmt)
-        worksheet.set_column('G:G', 60, cell_fmt)
+        worksheet.set_column('G:G', 30, cell_fmt)
+        worksheet.set_column('H:H', 60, cell_fmt)
         
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_fmt)
@@ -558,6 +563,68 @@ def render_connected_graph(data, min_cite_filter=0):
     clicked = agraph(nodes=nodes, edges=edges, config=cfg)
     return clicked, details
 
+# ================= 5. 图谱渲染 =================
+def render_connected_graph(data, min_cite_filter=0):
+    if not data: return None, {}
+    nodes, edges, details = [], [], {}
+    cur_year = 2026
+
+    def color(year, rel):
+        if not year or year == 'Unknown': return "#94a3b8"
+        age = max(0, cur_year - int(year))
+        if rel == 'seed': return "#FF4B4B"
+        if rel == 'cite': return "#059669" if age<2 else "#10b981" if age<5 else "#6ee7b7"
+        return "#2563eb" if age<2 else "#3b82f6" if age<5 else "#93c5fd"
+
+    seed = data.get('paperId','root')
+    details[seed] = {
+        "title":    data.get('title','Seed Paper'),
+        "abstract": data.get('abstract') or "无摘要",
+        "year":     data.get('year','Unknown'),
+        "cites":    data.get('citationCount',0),
+        "url":      f"https://www.semanticscholar.org/paper/{seed}",
+        "arxiv_id": None,
+    }
+    nodes.append(Node(id=seed, label="THIS PAPER", size=35, color=color(data.get('year'),'seed')))
+    seen = {seed}
+    refs_for_gap = []
+
+    combined = []
+    for p in data.get('references',[])[:20]: p['rel_type']='ref'; combined.append(p)
+    for p in data.get('citations',[])[:20]:  p['rel_type']='cite'; combined.append(p)
+
+    for item in combined:
+        pid   = item.get('paperId')
+        cites = item.get('citationCount',0) or 0
+        if not pid or pid in seen or cites < min_cite_filter: continue
+        seen.add(pid)
+        title    = item.get('title','Unknown')
+        year     = item.get('year')
+        ext      = item.get('externalIds') or {}
+        arxiv_id = ext.get('ArXiv')
+        details[pid] = {
+            "title":    title,
+            "abstract": item.get('abstract') or "暂无摘要",
+            "year":     year, "cites": cites,
+            "url":      f"https://www.semanticscholar.org/paper/{pid}",
+            "arxiv_id": arxiv_id,
+        }
+        if item['rel_type']=='ref' and arxiv_id:
+            refs_for_gap.append({"title":title,"arxiv_id":arxiv_id,"abstract":item.get('abstract','')})
+        sz = 15 + math.log(cites+1)*3.5
+        nodes.append(Node(id=pid, label=f"{title[:20]}…", size=sz, color=color(year, item['rel_type'])))
+        if item['rel_type']=='cite':
+            edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1, dashed=True))
+        else:
+            edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
+
+    st.session_state.graph_references_cache = refs_for_gap
+    cfg = Config(width="100%", height=560, directed=True, physics=True,
+                 nodeHighlightBehavior=True, highlightColor="#F7D154",
+                 d3={'alphaTarget':0.05,'gravity':-250,'linkLength':150,'linkStrength':0.1})
+    clicked = agraph(nodes=nodes, edges=edges, config=cfg)
+    return clicked, details
+
 # ================= 6. 侧边栏 =================
 with st.sidebar:
     st.header("🎛️ 控制台")
@@ -853,12 +920,37 @@ with tab_main:
             unsafe_allow_html=True
         )
 
-        st.download_button(
-            label="📥 点击下载当前已加载论文 (Excel)",
-            data=convert_to_excel(st.session_state.search_results),
-            file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        # --- 修改点 2：将原来单独一行的下载按钮，拆分成两列，新增批量打分按钮 ---
+        col_dl, col_batch = st.columns(2)
+        with col_dl:
+            st.download_button(
+                label="📥 下载当前已加载论文 (Excel)",
+                data=convert_to_excel(st.session_state.search_results),
+                file_name=f"ArXiv_Search_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with col_batch:
+            if st.button("⭐ 批量打分 (前100篇)", use_container_width=True):
+                with st.spinner("🚀 正在后台并行请求 DeepSeek，请耐心等待..."):
+                    # 只取前100篇
+                    to_process = st.session_state.search_results[:100]
+                    # 找出还没打过分的论文，防止重复扣费
+                    pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.score_cache]
+                    if pending:
+                        # 使用线程池加速请求
+                        with ThreadPoolExecutor(max_workers=5) as pool:
+                            futures = {
+                                pool.submit(get_paper_score, p['obj'].entry_id, p['obj'].title, p['obj'].summary, user_api_key, ss_api_key): p 
+                                for p in pending
+                            }
+                            # 等待所有任务完成
+                            for _ in as_completed(futures):
+                                pass
+                st.success("✅ 前100篇论文已打分完毕！现在导出的 Excel 也会包含分数了。")
+                time.sleep(2)  # 稍微停顿一下让你看到成功的绿框
+                st.rerun()
+        
         st.markdown("---")
         
         for i, item in enumerate(st.session_state.search_results):
