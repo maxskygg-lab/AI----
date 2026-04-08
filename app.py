@@ -350,9 +350,7 @@ def get_one_line_contribution(abstract, title, api_key):
 
 # --- 修改点：新增依据 SS 真实数据的单篇论文打分函数 ---
 def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
-    key = title[:60]
-    if key in st.session_state.score_cache:
-        return st.session_state.score_cache[key]
+    # 此处已移除对 st.session_state 的直接读写，变为纯函数，防止多线程崩溃
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
         url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount"
@@ -380,7 +378,6 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
         result = res.content.strip()
     except Exception as e:
         result = "（打分失败）"
-    st.session_state.score_cache[key] = result
     return result
 
 def fix_latex(text):
@@ -920,7 +917,6 @@ with tab_main:
             unsafe_allow_html=True
         )
 
-        # --- 修改点 2：将原来单独一行的下载按钮，拆分成两列，新增批量打分按钮 ---
         col_dl, col_batch = st.columns(2)
         with col_dl:
             st.download_button(
@@ -933,22 +929,24 @@ with tab_main:
         with col_batch:
             if st.button("⭐ 批量打分 (前100篇)", use_container_width=True):
                 with st.spinner("🚀 正在后台并行请求 DeepSeek，请耐心等待..."):
-                    # 只取前100篇
                     to_process = st.session_state.search_results[:100]
-                    # 找出还没打过分的论文，防止重复扣费
                     pending = [p for p in to_process if p['obj'].title[:60] not in st.session_state.score_cache]
                     if pending:
-                        # 使用线程池加速请求
+                        # 使用线程池加速请求，但在主线程中处理结果，防止 Streamlit 多线程上下文丢失
                         with ThreadPoolExecutor(max_workers=5) as pool:
                             futures = {
-                                pool.submit(get_paper_score, p['obj'].entry_id, p['obj'].title, p['obj'].summary, user_api_key, ss_api_key): p 
+                                pool.submit(get_paper_score, p['obj'].entry_id, p['obj'].title, p['obj'].summary, user_api_key, ss_api_key): p['obj'].title[:60] 
                                 for p in pending
                             }
-                            # 等待所有任务完成
-                            for _ in as_completed(futures):
-                                pass
+                            for future in as_completed(futures):
+                                key = futures[future]
+                                try:
+                                    # 将获取到的打分结果安全地写回主线程的 session_state
+                                    st.session_state.score_cache[key] = future.result()
+                                except Exception:
+                                    st.session_state.score_cache[key] = "（打分失败）"
                 st.success("✅ 前100篇论文已打分完毕！现在导出的 Excel 也会包含分数了。")
-                time.sleep(2)  # 稍微停顿一下让你看到成功的绿框
+                time.sleep(2)
                 st.rerun()
         
         st.markdown("---")
@@ -983,7 +981,9 @@ with tab_main:
                         st.rerun()
                 with cs:
                     if st.button("⭐ 打分", key=f"score_{i}"):
-                        with st.spinner("获取SS数据并打分..."): get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
+                        with st.spinner("获取SS数据并打分..."): 
+                            score = get_paper_score(res.entry_id, res.title, res.summary, user_api_key, ss_api_key)
+                            st.session_state.score_cache[ck] = score
                         st.rerun()
                 st.markdown(f'<div class="abstract-box"><b>摘要：</b>{res.summary.replace(chr(10)," ")}</div>', unsafe_allow_html=True)
                 b1,b2,b3 = st.columns(3)
