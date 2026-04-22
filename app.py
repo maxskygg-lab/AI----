@@ -628,94 +628,16 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
+# ══════════════════════════════════════════
 # Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
-    # --- 新增：实验模式开关 ---
+    
+    # --- 新增/修改点 1：实验模式开关 ---
     use_local_db = st.toggle("🔬 开启实验模式：本地纯语义向量检索 (Teacher's DB)")
     
-    sq1,sq2 = st.columns([4,2])
-    with sq1:
-        search_query = st.text_input("关键词", value=st.session_state.suggested_query,
-                                     placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
-    with sq2:
-        sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
-
-    # ... 中间的 UI 代码保持不变 ...
-
-    if st.button("🚀 检索", use_container_width=True) and search_query:
-        
-        if use_local_db:
-            # ====================================================
-            # 老师要求的实验逻辑：加载本地库 -> 语义检索 -> 再排序
-            # ====================================================
-            with st.spinner("🧠 正在本地向量数据库中执行纯语义检索..."):
-                try:
-                    # 1. 加载刚才离线建好的数据库
-                    embeddings = get_embeddings_model()
-                    local_db = FAISS.load_local("my_semantic_paper_db", embeddings, allow_dangerous_deserialization=True)
-                    
-                    # 2. 语义计算：将用户的 query 转化为向量，并进行相似度检索 (召回 Top 30)
-                    # 返回的 docs_and_scores 中，score 是 L2 距离 (越小越相关)
-                    docs_and_scores = local_db.similarity_search_with_score(search_query, k=30)
-                    
-                    st.session_state.search_results = []
-                    current_year = datetime.now().year
-                    
-                    # 3. 数据重组与最后排序
-                    for rank, (doc, l2_distance) in enumerate(docs_and_scores):
-                        meta = doc.metadata
-                        
-                        # 把 L2 距离(越小越好) 粗略映射为 0-100 的 Relevance_Score(越大越好)
-                        # 这是一个工程上的小 trick，让它能完美接入你之前的加权公式
-                        rel_score = max(0, 100 - (l2_distance * 50)) 
-                        
-                        cites = meta["citations"] or 0
-                        cite_score = (math.log10(cites + 1) / 3.0) * 100
-                        age = max(0, current_year - meta["year"])
-                        
-                        # 沿用你的综合排序逻辑
-                        if "质量优先" in sort_mode:
-                            time_bonus = 40 if age == 0 else (20 if age == 1 else (10 if age == 2 else 0))
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            total_score = (rel_score * 0.2) + (quality_score * 0.8)
-                        else:
-                            time_bonus = max(0, 30 - age * 10)
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            total_score = (rel_score * 0.6) + (quality_score * 0.4)
-                        
-                        # 伪造一个类似 ArXiv 的对象结构，兼容你后面的 UI 代码
-                        class FakeArxivObj:
-                            def __init__(self, m, d):
-                                self.title = m["title"]
-                                self.summary = d.page_content.split("Abstract: ")[-1]
-                                self.entry_id = m["arxiv_id"]
-                                self.published = datetime(m["year"], 1, 1)
-                                class FakeAuthor:
-                                    def __init__(self, name): self.name = name
-                                self.authors = [FakeAuthor(n) for n in m["authors"].split(", ")]
-                                
-                        st.session_state.search_results.append({
-                            "obj": FakeArxivObj(meta, doc),
-                            "citations": cites,
-                            "total_score": total_score
-                        })
-                    
-                    # 4. 根据你的公式执行最后的强排序
-                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                    st.session_state.citations_loaded = True
-                    st.success(f"✅ 本地语义检索完成，耗时极短，召回 {len(st.session_state.search_results)} 篇")
-                    
-                except Exception as e:
-                    st.error(f"本地数据库检索失败，请确认是否已运行建库脚本: {e}")
-        else:
-            # ====================================================
-            # 原有的逻辑：调用 ArXiv API (保留这部分代码一字不改)
-            # ====================================================
-            with st.spinner("正在向 ArXiv 请求数据..."):
-                # ... 你原本的 ArXiv 检索和排序代码 ...
-    
+    # --- 修改点 2：合并 UI 控件，全局只保留这一套搜索框和筛选器 ---
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
@@ -741,116 +663,166 @@ with tab_main:
         with adv2:
             journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE,ACM,CVPR,NIPS")
 
+    # --- 修改点 3：统一的检索按钮，内部进行分支判断 ---
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        with st.spinner("正在向 ArXiv 请求数据..."):
-            try:
-                asort = arxiv.SortCriterion.Relevance
-                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                
-                # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
-                refined = search_query
-                if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
-                    refined = " AND ".join([f'all:{w}' for w in search_query.split()])
-                else:
-                    refined = f"({refined})"
-
-                if category_options[selected_category]:
-                    refined += f" AND cat:{category_options[selected_category]}"
-
-                if journal_query.strip():
-                    val = journal_query.strip()
-                    refined += f' AND (jr:"{val}" OR co:"{val}")'
-                
-                # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
-                st.caption(f"🔍 检索指令预览: `{refined}`")
-
-                # --- 429 防崩溃重试机制 ---
-                max_retries = 3
-                raw = []
-                for attempt in range(max_retries):
-                    try:
-                        # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
-                        raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
-                        st.session_state.search_generator = raw_gen
-                        # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
-                        raw = list(itertools.islice(raw_gen, 100))
-                        break 
-                    except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            time.sleep(3)
-                            continue
-                        else: raise e
-                
-                # --- 新增辅助提示：针对零结果给出清晰引导 ---
-                if not raw:
-                    st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
-                
-                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-                st.session_state.citations_loaded = False
-                st.session_state.contributions_cache = {}
-                st.session_state.focus_paper_id = None
-            except Exception as e: st.error(f"检索失败: {e}")
-
-        if st.session_state.search_results:
-            t0 = time.time()
-            with st.spinner("同步引用数..."):
-                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                for item in st.session_state.search_results:
-                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                
-                if "引用量" in sort_mode:
-                    st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                elif "质量优先" in sort_mode:
-                    import math
+        
+        if use_local_db:
+            # ====================================================
+            # 实验逻辑：加载本地库 -> 语义检索 -> 再排序
+            # ====================================================
+            with st.spinner("🧠 正在本地向量数据库中执行纯语义检索..."):
+                try:
+                    embeddings = get_embeddings_model()
+                    local_db = FAISS.load_local("my_semantic_paper_db", embeddings, allow_dangerous_deserialization=True)
+                    
+                    docs_and_scores = local_db.similarity_search_with_score(search_query, k=30)
+                    
+                    st.session_state.search_results = []
                     current_year = datetime.now().year
-                    for idx, item in enumerate(st.session_state.search_results):
-                        # 引入基础相关性兜底 (20%权重)，防止无关的超高引文霸榜
-                        if idx < 10: rel_score = 100
-                        elif idx < 20: rel_score = 85
-                        elif idx < 30: rel_score = 70
-                        else: rel_score = 50
+                    
+                    for rank, (doc, l2_distance) in enumerate(docs_and_scores):
+                        meta = doc.metadata
+                        rel_score = max(0, 100 - (l2_distance * 50)) 
                         
-                        cites = item["citations"] or 0
+                        cites = meta["citations"] or 0
                         cite_score = (math.log10(cites + 1) / 3.0) * 100
+                        age = max(0, current_year - meta["year"])
                         
-                        pub_year = item['obj'].published.year
-                        age = max(0, current_year - pub_year)
-                        time_bonus = 0
-                        if age == 0: time_bonus = 40
-                        elif age == 1: time_bonus = 20
-                        elif age == 2: time_bonus = 10
+                        if "质量优先" in sort_mode:
+                            time_bonus = 40 if age == 0 else (20 if age == 1 else (10 if age == 2 else 0))
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            total_score = (rel_score * 0.2) + (quality_score * 0.8)
+                        else:
+                            time_bonus = max(0, 30 - age * 10)
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            total_score = (rel_score * 0.6) + (quality_score * 0.4)
                         
-                        quality_score = min(100.0, cite_score + time_bonus)
-                        # 质量绝对主导(80%)，但必须有相关性(20%)作为约束
-                        item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
-                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                elif "综合" in sort_mode:
-                    import math
-                    current_year = datetime.now().year
-                    max_items = len(st.session_state.search_results)
-                    for idx, item in enumerate(st.session_state.search_results):
-                        if idx < 10: rel_score = 100
-                        elif idx < 20: rel_score = 85
-                        elif idx < 30: rel_score = 70
-                        else: rel_score = 50
-
-                        cites = item["citations"] or 0
-                        cite_score = (math.log10(cites + 1) / 3.0) * 100
-                        
-                        pub_year = item['obj'].published.year
-                        age = max(0, current_year - pub_year)
-                        time_bonus = max(0, 30 - age * 10)
-                        
-                        quality_score = min(100.0, cite_score + time_bonus)
-                        item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                        class FakeArxivObj:
+                            def __init__(self, m, d):
+                                self.title = m["title"]
+                                self.summary = d.page_content.split("Abstract: ")[-1]
+                                self.entry_id = m["arxiv_id"]
+                                self.published = datetime(m["year"], 1, 1)
+                                class FakeAuthor:
+                                    def __init__(self, name): self.name = name
+                                self.authors = [FakeAuthor(n) for n in m["authors"].split(", ")]
+                                
+                        st.session_state.search_results.append({
+                            "obj": FakeArxivObj(meta, doc),
+                            "citations": cites,
+                            "total_score": total_score
+                        })
                     
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    st.session_state.citations_loaded = True
+                    st.success(f"✅ 本地语义检索完成，耗时极短，召回 {len(st.session_state.search_results)} 篇")
+                    
+                except Exception as e:
+                    st.error(f"本地数据库检索失败，请确认是否已运行建库脚本: {e}")
+        else:
+            # ====================================================
+            # 原有的逻辑：调用 ArXiv API (全部缩进放入 else 分支)
+            # ====================================================
+            with st.spinner("正在向 ArXiv 请求数据..."):
+                try:
+                    asort = arxiv.SortCriterion.Relevance
+                    if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                    
+                    refined = search_query
+                    if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                        refined = " AND ".join([f'all:{w}' for w in search_query.split()])
+                    else:
+                        refined = f"({refined})"
+
+                    if category_options[selected_category]:
+                        refined += f" AND cat:{category_options[selected_category]}"
+
+                    if journal_query.strip():
+                        val = journal_query.strip()
+                        refined += f' AND (jr:"{val}" OR co:"{val}")'
+                    
+                    st.caption(f"🔍 检索指令预览: `{refined}`")
+
+                    max_retries = 3
+                    raw = []
+                    for attempt in range(max_retries):
+                        try:
+                            raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
+                            st.session_state.search_generator = raw_gen
+                            raw = list(itertools.islice(raw_gen, 100))
+                            break 
+                        except Exception as e:
+                            if "429" in str(e) and attempt < max_retries - 1:
+                                time.sleep(3)
+                                continue
+                            else: raise e
+                    
+                    if not raw:
+                        st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
+                    
+                    st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                    st.session_state.citations_loaded = False
+                    st.session_state.contributions_cache = {}
+                    st.session_state.focus_paper_id = None
+                except Exception as e: st.error(f"检索失败: {e}")
+
+            if st.session_state.search_results:
+                t0 = time.time()
+                with st.spinner("同步引用数..."):
+                    id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
+                    for item in st.session_state.search_results:
+                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                    
+                    if "引用量" in sort_mode:
+                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                    elif "质量优先" in sort_mode:
+                        import math
+                        current_year = datetime.now().year
+                        for idx, item in enumerate(st.session_state.search_results):
+                            if idx < 10: rel_score = 100
+                            elif idx < 20: rel_score = 85
+                            elif idx < 30: rel_score = 70
+                            else: rel_score = 50
+                            
+                            cites = item["citations"] or 0
+                            cite_score = (math.log10(cites + 1) / 3.0) * 100
+                            
+                            pub_year = item['obj'].published.year
+                            age = max(0, current_year - pub_year)
+                            time_bonus = 0
+                            if age == 0: time_bonus = 40
+                            elif age == 1: time_bonus = 20
+                            elif age == 2: time_bonus = 10
+                            
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
+                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    elif "综合" in sort_mode:
+                        import math
+                        current_year = datetime.now().year
+                        max_items = len(st.session_state.search_results)
+                        for idx, item in enumerate(st.session_state.search_results):
+                            if idx < 10: rel_score = 100
+                            elif idx < 20: rel_score = 85
+                            elif idx < 30: rel_score = 70
+                            else: rel_score = 50
+
+                            cites = item["citations"] or 0
+                            cite_score = (math.log10(cites + 1) / 3.0) * 100
+                            
+                            pub_year = item['obj'].published.year
+                            age = max(0, current_year - pub_year)
+                            time_bonus = max(0, 30 - age * 10)
+                            
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                        
+                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    
+                    st.session_state.citations_loaded = True
                 
-                st.session_state.citations_loaded = True
-            
-            st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
-            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+                st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
+                preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
