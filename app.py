@@ -632,6 +632,89 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
+    # --- 新增：实验模式开关 ---
+    use_local_db = st.toggle("🔬 开启实验模式：本地纯语义向量检索 (Teacher's DB)")
+    
+    sq1,sq2 = st.columns([4,2])
+    with sq1:
+        search_query = st.text_input("关键词", value=st.session_state.suggested_query,
+                                     placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
+    with sq2:
+        sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
+
+    # ... 中间的 UI 代码保持不变 ...
+
+    if st.button("🚀 检索", use_container_width=True) and search_query:
+        
+        if use_local_db:
+            # ====================================================
+            # 老师要求的实验逻辑：加载本地库 -> 语义检索 -> 再排序
+            # ====================================================
+            with st.spinner("🧠 正在本地向量数据库中执行纯语义检索..."):
+                try:
+                    # 1. 加载刚才离线建好的数据库
+                    embeddings = get_embeddings_model()
+                    local_db = FAISS.load_local("my_semantic_paper_db", embeddings, allow_dangerous_deserialization=True)
+                    
+                    # 2. 语义计算：将用户的 query 转化为向量，并进行相似度检索 (召回 Top 30)
+                    # 返回的 docs_and_scores 中，score 是 L2 距离 (越小越相关)
+                    docs_and_scores = local_db.similarity_search_with_score(search_query, k=30)
+                    
+                    st.session_state.search_results = []
+                    current_year = datetime.now().year
+                    
+                    # 3. 数据重组与最后排序
+                    for rank, (doc, l2_distance) in enumerate(docs_and_scores):
+                        meta = doc.metadata
+                        
+                        # 把 L2 距离(越小越好) 粗略映射为 0-100 的 Relevance_Score(越大越好)
+                        # 这是一个工程上的小 trick，让它能完美接入你之前的加权公式
+                        rel_score = max(0, 100 - (l2_distance * 50)) 
+                        
+                        cites = meta["citations"] or 0
+                        cite_score = (math.log10(cites + 1) / 3.0) * 100
+                        age = max(0, current_year - meta["year"])
+                        
+                        # 沿用你的综合排序逻辑
+                        if "质量优先" in sort_mode:
+                            time_bonus = 40 if age == 0 else (20 if age == 1 else (10 if age == 2 else 0))
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            total_score = (rel_score * 0.2) + (quality_score * 0.8)
+                        else:
+                            time_bonus = max(0, 30 - age * 10)
+                            quality_score = min(100.0, cite_score + time_bonus)
+                            total_score = (rel_score * 0.6) + (quality_score * 0.4)
+                        
+                        # 伪造一个类似 ArXiv 的对象结构，兼容你后面的 UI 代码
+                        class FakeArxivObj:
+                            def __init__(self, m, d):
+                                self.title = m["title"]
+                                self.summary = d.page_content.split("Abstract: ")[-1]
+                                self.entry_id = m["arxiv_id"]
+                                self.published = datetime(m["year"], 1, 1)
+                                class FakeAuthor:
+                                    def __init__(self, name): self.name = name
+                                self.authors = [FakeAuthor(n) for n in m["authors"].split(", ")]
+                                
+                        st.session_state.search_results.append({
+                            "obj": FakeArxivObj(meta, doc),
+                            "citations": cites,
+                            "total_score": total_score
+                        })
+                    
+                    # 4. 根据你的公式执行最后的强排序
+                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    st.session_state.citations_loaded = True
+                    st.success(f"✅ 本地语义检索完成，耗时极短，召回 {len(st.session_state.search_results)} 篇")
+                    
+                except Exception as e:
+                    st.error(f"本地数据库检索失败，请确认是否已运行建库脚本: {e}")
+        else:
+            # ====================================================
+            # 原有的逻辑：调用 ArXiv API (保留这部分代码一字不改)
+            # ====================================================
+            with st.spinner("正在向 ArXiv 请求数据..."):
+                # ... 你原本的 ArXiv 检索和排序代码 ...
     
     sq1,sq2 = st.columns([4,2])
     with sq1:
