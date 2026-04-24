@@ -12,12 +12,14 @@ try:
     # --- 修改点：引入 OpenAI 接口适配 DeepSeek 和 HuggingFace 免费向量 ---
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import HuggingFaceEmbeddings
+    # --- 修改点：引入 Pinecone 云端向量数据库 ---
+    from langchain_pinecone import PineconeVectorStore
 except ImportError as e:
-    st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf")
+    st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf langchain-pinecone pinecone-client")
     st.stop()
 
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
+# from langchain_community.vectorstores import FAISS # --- 修改点：移除本地 FAISS 占位 ---
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
@@ -102,6 +104,10 @@ except:
     USER_API_KEY = "" # 避免报错，可在侧边栏提示用户
 
 SS_API_KEY = st.secrets.get("SS_API_KEY", "")
+
+# --- 修改点：新增 Pinecone 配置 ---
+PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
+PINECONE_INDEX_NAME = st.secrets.get("PINECONE_INDEX_NAME", "arxiv-papers")
 
 # ================= 3. 状态初始化 =================
 defaults = {
@@ -404,13 +410,19 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         embeddings = get_embeddings_model()
         
         batch = 10
+        # --- 修改点：连接并写入 Pinecone 云数据库 ---
+        if not PINECONE_API_KEY:
+            st.error("🚑 请先在 Streamlit Secrets 中配置 PINECONE_API_KEY"); return False
+        os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
+        
         if t["db"] is None:
-            t["db"] = FAISS.from_documents(chunks[:batch], embeddings)
-            for i in range(batch, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
-        else:
-            for i in range(0, len(chunks), batch):
-                t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
+            # 初始化连接云端索引，按主题划分 namespace
+            t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=topic_name)
+            
+        # 直接向 Pinecone 批量添加文档向量
+        for i in range(0, len(chunks), batch):
+            t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
+            
         if file_name not in t["files"]:
             t["files"].append(file_name)
         st.session_state.chat_history.append({
@@ -427,7 +439,11 @@ def rebuild_topic_index(topic_name, api_key):
     
     # --- 修改点：使用 HuggingFace 免费向量 ---
     embeddings = get_embeddings_model()
-    t["db"] = FAISS.from_documents(t["chunks"], embeddings)
+    # --- 修改点：重建索引时重新连接 Pinecone ---
+    import os
+    if PINECONE_API_KEY:
+        os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
+    t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=topic_name)
 
 def detect_knowledge_gap(answer_text, docs):
     sigs = ["资料不足","没有找到","无法回答","未提及","不清楚","没有相关","cannot find","not mentioned"]
@@ -604,8 +620,18 @@ with st.sidebar:
                 if st.button("🗑️", key=f"del_{f}"):
                     ts["files"].remove(f)
                     ts["chunks"] = [c for c in ts["chunks"] if c.metadata.get('source_paper')!=f]
+                    # --- 修改点：同步删除 Pinecone 云端该论文的向量数据 ---
+                    if ts["db"]:
+                        try:
+                            ts["db"].delete(filter={"source_paper": f})
+                        except Exception: pass
                     rebuild_topic_index(st.session_state.active_topic, user_api_key); st.rerun()
         if st.button("🗑️ 清空主题", type="primary"):
+            # --- 修改点：连带清空 Pinecone 该主题的 namespace ---
+            if ts["db"]:
+                try:
+                    ts["db"].delete(delete_all=True, namespace=st.session_state.active_topic)
+                except Exception: pass
             ts["files"],ts["chunks"],ts["db"] = [],[],None
             st.session_state.chat_history = []; st.rerun()
 
@@ -628,16 +654,11 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 ])
 
 # ══════════════════════════════════════════
-# ══════════════════════════════════════════
 # Tab 1：学术检索 & 图谱
 # ══════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
-    # --- 新增/修改点 1：实验模式开关 ---
-    use_local_db = st.toggle("🔬 开启实验模式：本地纯语义向量检索 (Teacher's DB)")
-    
-    # --- 修改点 2：合并 UI 控件，全局只保留这一套搜索框和筛选器 ---
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
@@ -663,166 +684,116 @@ with tab_main:
         with adv2:
             journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE,ACM,CVPR,NIPS")
 
-    # --- 修改点 3：统一的检索按钮，内部进行分支判断 ---
     if st.button("🚀 检索", use_container_width=True) and search_query:
-        
-        if use_local_db:
-            # ====================================================
-            # 实验逻辑：加载本地库 -> 语义检索 -> 再排序
-            # ====================================================
-            with st.spinner("🧠 正在本地向量数据库中执行纯语义检索..."):
-                try:
-                    embeddings = get_embeddings_model()
-                    local_db = FAISS.load_local("my_semantic_paper_db", embeddings, allow_dangerous_deserialization=True)
-                    
-                    docs_and_scores = local_db.similarity_search_with_score(search_query, k=30)
-                    
-                    st.session_state.search_results = []
+        with st.spinner("正在向 ArXiv 请求数据..."):
+            try:
+                asort = arxiv.SortCriterion.Relevance
+                if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
+                
+                # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
+                refined = search_query
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
+                    refined = " AND ".join([f'all:{w}' for w in search_query.split()])
+                else:
+                    refined = f"({refined})"
+
+                if category_options[selected_category]:
+                    refined += f" AND cat:{category_options[selected_category]}"
+
+                if journal_query.strip():
+                    val = journal_query.strip()
+                    refined += f' AND (jr:"{val}" OR co:"{val}")'
+                
+                # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
+                st.caption(f"🔍 检索指令预览: `{refined}`")
+
+                # --- 429 防崩溃重试机制 ---
+                max_retries = 3
+                raw = []
+                for attempt in range(max_retries):
+                    try:
+                        # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
+                        raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
+                        st.session_state.search_generator = raw_gen
+                        # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
+                        raw = list(itertools.islice(raw_gen, 100))
+                        break 
+                    except Exception as e:
+                        if "429" in str(e) and attempt < max_retries - 1:
+                            time.sleep(3)
+                            continue
+                        else: raise e
+                
+                # --- 新增辅助提示：针对零结果给出清晰引导 ---
+                if not raw:
+                    st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
+                
+                st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                st.session_state.citations_loaded = False
+                st.session_state.contributions_cache = {}
+                st.session_state.focus_paper_id = None
+            except Exception as e: st.error(f"检索失败: {e}")
+
+        if st.session_state.search_results:
+            t0 = time.time()
+            with st.spinner("同步引用数..."):
+                id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
+                for item in st.session_state.search_results:
+                    item["citations"] = id2c.get(item['obj'].entry_id, 0)
+                
+                if "引用量" in sort_mode:
+                    st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
+                elif "质量优先" in sort_mode:
+                    import math
                     current_year = datetime.now().year
-                    
-                    for rank, (doc, l2_distance) in enumerate(docs_and_scores):
-                        meta = doc.metadata
-                        rel_score = max(0, 100 - (l2_distance * 50)) 
+                    for idx, item in enumerate(st.session_state.search_results):
+                        # 引入基础相关性兜底 (20%权重)，防止无关的超高引文霸榜
+                        if idx < 10: rel_score = 100
+                        elif idx < 20: rel_score = 85
+                        elif idx < 30: rel_score = 70
+                        else: rel_score = 50
                         
-                        cites = meta["citations"] or 0
+                        cites = item["citations"] or 0
                         cite_score = (math.log10(cites + 1) / 3.0) * 100
-                        age = max(0, current_year - meta["year"])
                         
-                        if "质量优先" in sort_mode:
-                            time_bonus = 40 if age == 0 else (20 if age == 1 else (10 if age == 2 else 0))
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            total_score = (rel_score * 0.2) + (quality_score * 0.8)
-                        else:
-                            time_bonus = max(0, 30 - age * 10)
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            total_score = (rel_score * 0.6) + (quality_score * 0.4)
+                        pub_year = item['obj'].published.year
+                        age = max(0, current_year - pub_year)
+                        time_bonus = 0
+                        if age == 0: time_bonus = 40
+                        elif age == 1: time_bonus = 20
+                        elif age == 2: time_bonus = 10
                         
-                        class FakeArxivObj:
-                            def __init__(self, m, d):
-                                self.title = m["title"]
-                                self.summary = d.page_content.split("Abstract: ")[-1]
-                                self.entry_id = m["arxiv_id"]
-                                self.published = datetime(m["year"], 1, 1)
-                                class FakeAuthor:
-                                    def __init__(self, name): self.name = name
-                                self.authors = [FakeAuthor(n) for n in m["authors"].split(", ")]
-                                
-                        st.session_state.search_results.append({
-                            "obj": FakeArxivObj(meta, doc),
-                            "citations": cites,
-                            "total_score": total_score
-                        })
+                        quality_score = min(100.0, cite_score + time_bonus)
+                        # 质量绝对主导(80%)，但必须有相关性(20%)作为约束
+                        item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
+                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                elif "综合" in sort_mode:
+                    import math
+                    current_year = datetime.now().year
+                    max_items = len(st.session_state.search_results)
+                    for idx, item in enumerate(st.session_state.search_results):
+                        if idx < 10: rel_score = 100
+                        elif idx < 20: rel_score = 85
+                        elif idx < 30: rel_score = 70
+                        else: rel_score = 50
+
+                        cites = item["citations"] or 0
+                        cite_score = (math.log10(cites + 1) / 3.0) * 100
+                        
+                        pub_year = item['obj'].published.year
+                        age = max(0, current_year - pub_year)
+                        time_bonus = max(0, 30 - age * 10)
+                        
+                        quality_score = min(100.0, cite_score + time_bonus)
+                        item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
                     
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                    st.session_state.citations_loaded = True
-                    st.success(f"✅ 本地语义检索完成，耗时极短，召回 {len(st.session_state.search_results)} 篇")
-                    
-                except Exception as e:
-                    st.error(f"本地数据库检索失败，请确认是否已运行建库脚本: {e}")
-        else:
-            # ====================================================
-            # 原有的逻辑：调用 ArXiv API (全部缩进放入 else 分支)
-            # ====================================================
-            with st.spinner("正在向 ArXiv 请求数据..."):
-                try:
-                    asort = arxiv.SortCriterion.Relevance
-                    if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
-                    
-                    refined = search_query
-                    if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                        refined = " AND ".join([f'all:{w}' for w in search_query.split()])
-                    else:
-                        refined = f"({refined})"
-
-                    if category_options[selected_category]:
-                        refined += f" AND cat:{category_options[selected_category]}"
-
-                    if journal_query.strip():
-                        val = journal_query.strip()
-                        refined += f' AND (jr:"{val}" OR co:"{val}")'
-                    
-                    st.caption(f"🔍 检索指令预览: `{refined}`")
-
-                    max_retries = 3
-                    raw = []
-                    for attempt in range(max_retries):
-                        try:
-                            raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
-                            st.session_state.search_generator = raw_gen
-                            raw = list(itertools.islice(raw_gen, 100))
-                            break 
-                        except Exception as e:
-                            if "429" in str(e) and attempt < max_retries - 1:
-                                time.sleep(3)
-                                continue
-                            else: raise e
-                    
-                    if not raw:
-                        st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
-                    
-                    st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
-                    st.session_state.citations_loaded = False
-                    st.session_state.contributions_cache = {}
-                    st.session_state.focus_paper_id = None
-                except Exception as e: st.error(f"检索失败: {e}")
-
-            if st.session_state.search_results:
-                t0 = time.time()
-                with st.spinner("同步引用数..."):
-                    id2c = smart_fetch_citations(st.session_state.search_results, ss_key=ss_api_key)
-                    for item in st.session_state.search_results:
-                        item["citations"] = id2c.get(item['obj'].entry_id, 0)
-                    
-                    if "引用量" in sort_mode:
-                        st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    elif "质量优先" in sort_mode:
-                        import math
-                        current_year = datetime.now().year
-                        for idx, item in enumerate(st.session_state.search_results):
-                            if idx < 10: rel_score = 100
-                            elif idx < 20: rel_score = 85
-                            elif idx < 30: rel_score = 70
-                            else: rel_score = 50
-                            
-                            cites = item["citations"] or 0
-                            cite_score = (math.log10(cites + 1) / 3.0) * 100
-                            
-                            pub_year = item['obj'].published.year
-                            age = max(0, current_year - pub_year)
-                            time_bonus = 0
-                            if age == 0: time_bonus = 40
-                            elif age == 1: time_bonus = 20
-                            elif age == 2: time_bonus = 10
-                            
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
-                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                    elif "综合" in sort_mode:
-                        import math
-                        current_year = datetime.now().year
-                        max_items = len(st.session_state.search_results)
-                        for idx, item in enumerate(st.session_state.search_results):
-                            if idx < 10: rel_score = 100
-                            elif idx < 20: rel_score = 85
-                            elif idx < 30: rel_score = 70
-                            else: rel_score = 50
-
-                            cites = item["citations"] or 0
-                            cite_score = (math.log10(cites + 1) / 3.0) * 100
-                            
-                            pub_year = item['obj'].published.year
-                            age = max(0, current_year - pub_year)
-                            time_bonus = max(0, 30 - age * 10)
-                            
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
-                        
-                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                    
-                    st.session_state.citations_loaded = True
                 
-                st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
-                preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
+                st.session_state.citations_loaded = True
+            
+            st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
+            preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
 
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
@@ -1169,7 +1140,7 @@ with tab_read:
                     status_text = f"🔍 正在全库 {len(t['files'])} 篇论文中检索..."
 
                 with st.spinner(status_text):
-                    # 执行检索
+                    # 执行检索 (Pinecone 天然支持相似度和 MMR 排序检索)
                     if filter_rule:
                         docs = t["db"].similarity_search(prompt, **search_kwargs)
                         # --- 修改点：单篇模式下，额外获取 SS 真实元数据以增强问答 ---
@@ -1388,7 +1359,7 @@ with tab_track:
 with tab_notes:
     st.subheader("📌 我的笔记库")
     if not st.session_state.notes:
-        st.info("还没有笔记。在「研读空间」提问后点击「保存为笔记」即可积累。")
+        st.info("还没有笔记。在「研读空间」提问后点击「保存没笔记」即可积累。")
     else:
         all_tags   = sorted(set(tag for n in st.session_state.notes for tag in n["tags"]))
         all_topics = sorted(set(n["topic"] for n in st.session_state.notes))
