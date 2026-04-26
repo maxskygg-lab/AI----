@@ -920,14 +920,14 @@ with tab_main:
             dl_num = st.number_input("📦 **下载原文数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_n")
             if st.button(f"🔄 打包 ZIP (前 {dl_num} 篇)", use_container_width=True):
                 # ==========================
-                # --- 新修改点：重构打包逻辑以防崩溃 ---
+                # --- 新修改点：重构打包逻辑，开启真实硬盘流式传输，彻底防止内存崩溃 ---
                 # ==========================
                 import zipfile
-                # 使用硬盘临时文件替代内存缓冲 (防 Out of Memory 爆内存)
+                # 使用硬盘临时文件替代内存缓冲
                 temp_zip_path = os.path.join(tempfile.gettempdir(), f"arxiv_batch_{uuid.uuid4().hex[:8]}.zip")
                 to_dl = st.session_state.search_results[:dl_num]
                 
-                # 使用状态文本与进度条，保证网页实时与后台通讯 (防网关 Timeout 断连)
+                # 使用状态文本与进度条，保证网页实时与后台通讯
                 status_text = st.empty()
                 progress_bar = st.progress(0)
                 
@@ -950,29 +950,24 @@ with tab_main:
                 
                 status_text.text("✅ 打包完成！正在生成最终下载链接...")
                 
-                # 最后将完整的硬盘文件统一读取，传递给缓存器
-                with open(temp_zip_path, "rb") as f:
-                    st.session_state.ready_zip_data = f.read()
+                # 保留文件路径，而不是将几百兆数据塞进内存变量
+                st.session_state.ready_zip_path = temp_zip_path
                 st.session_state.ready_zip_name = f"ArXiv_PDFs_Top{dl_num}_{datetime.now().strftime('%m%d_%H%M')}.zip"
-                
-                # 阅后即焚，清理硬盘废弃文件
-                try:
-                    os.remove(temp_zip_path)
-                except: pass
                 # ==========================
                 # --- 新修改点结束 ---
                 # ==========================
             
-            # 如果缓存里有打好包的压缩文件，就弹出真实的下载按钮供你点击
-            if st.session_state.get("ready_zip_data"):
-                st.download_button(
-                    label="✅ 点击下载压缩包",
-                    data=st.session_state.ready_zip_data,
-                    file_name=st.session_state.ready_zip_name,
-                    mime="application/zip",
-                    use_container_width=True,
-                    type="primary"
-                )
+            # 如果缓存里有打包好的文件路径，打开文件流供按钮下载，零内存占用！
+            if st.session_state.get("ready_zip_path") and os.path.exists(st.session_state.get("ready_zip_path")):
+                with open(st.session_state.ready_zip_path, "rb") as f:
+                    st.download_button(
+                        label="✅ 点击下载压缩包",
+                        data=f,
+                        file_name=st.session_state.ready_zip_name,
+                        mime="application/zip",
+                        use_container_width=True,
+                        type="primary"
+                    )
         # --- 修改点结束 ---
         
         st.markdown("---")
