@@ -919,26 +919,49 @@ with tab_main:
         with col_pdf:
             dl_num = st.number_input("📦 **下载原文数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_n")
             if st.button(f"🔄 打包 ZIP (前 {dl_num} 篇)", use_container_width=True):
-                with st.spinner(f"📥 正在从 ArXiv 提取前 {dl_num} 篇 PDF 并压缩，这可能需要几十秒，请勿刷新页面..."):
-                    import zipfile
-                    zip_buffer = io.BytesIO()
-                    to_dl = st.session_state.search_results[:dl_num]
-                    # 将下载下来的 PDF 写入到这一个 ZIP 缓冲包里
-                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for idx, item in enumerate(to_dl):
-                            res = item['obj']
-                            try:
-                                # 复用咱们已有的高效直链下载函数
-                                p_path = download_arxiv_pdf_direct(res.entry_id)
-                                # 清理文件名中的非法字符，防止解压时在 Windows/Mac 上报错
-                                safe_title = re.sub(r'[\\/*?:"<>|]', "", res.title)[:50]
-                                filename = f"{idx+1}_{safe_title}.pdf"
-                                zf.write(p_path, arcname=filename)
-                                os.remove(p_path) # 用完即删，保护服务器硬盘不被撑爆
-                            except Exception as e:
-                                pass # 如果某篇下载失败，直接跳过，保证其余的正常打包完毕
-                    st.session_state.ready_zip_data = zip_buffer.getvalue()
-                    st.session_state.ready_zip_name = f"ArXiv_PDFs_Top{dl_num}_{datetime.now().strftime('%m%d_%H%M')}.zip"
+                # ==========================
+                # --- 新修改点：重构打包逻辑以防崩溃 ---
+                # ==========================
+                import zipfile
+                # 使用硬盘临时文件替代内存缓冲 (防 Out of Memory 爆内存)
+                temp_zip_path = os.path.join(tempfile.gettempdir(), f"arxiv_batch_{uuid.uuid4().hex[:8]}.zip")
+                to_dl = st.session_state.search_results[:dl_num]
+                
+                # 使用状态文本与进度条，保证网页实时与后台通讯 (防网关 Timeout 断连)
+                status_text = st.empty()
+                progress_bar = st.progress(0)
+                
+                with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for idx, item in enumerate(to_dl):
+                        res = item['obj']
+                        status_text.text(f"📥 正在提取并压缩 ({idx+1}/{dl_num}): {res.title[:25]}...")
+                        try:
+                            # 增加 1.5 秒安全休眠，防高并发触发 ArXiv 的防 DDoS 封锁
+                            time.sleep(1.5)
+                            p_path = download_arxiv_pdf_direct(res.entry_id)
+                            safe_title = re.sub(r'[\\/*?:"<>|]', "", res.title)[:50]
+                            filename = f"{idx+1}_{safe_title}.pdf"
+                            zf.write(p_path, arcname=filename)
+                            os.remove(p_path) 
+                        except Exception as e:
+                            pass 
+                        # 每次循环更新进度，维持前端存活
+                        progress_bar.progress((idx + 1) / dl_num)
+                
+                status_text.text("✅ 打包完成！正在生成最终下载链接...")
+                
+                # 最后将完整的硬盘文件统一读取，传递给缓存器
+                with open(temp_zip_path, "rb") as f:
+                    st.session_state.ready_zip_data = f.read()
+                st.session_state.ready_zip_name = f"ArXiv_PDFs_Top{dl_num}_{datetime.now().strftime('%m%d_%H%M')}.zip"
+                
+                # 阅后即焚，清理硬盘废弃文件
+                try:
+                    os.remove(temp_zip_path)
+                except: pass
+                # ==========================
+                # --- 新修改点结束 ---
+                # ==========================
             
             # 如果缓存里有打好包的压缩文件，就弹出真实的下载按钮供你点击
             if st.session_state.get("ready_zip_data"):
@@ -1140,7 +1163,7 @@ with tab_read:
                     status_text = f"🔍 正在全库 {len(t['files'])} 篇论文中检索..."
 
                 with st.spinner(status_text):
-                    # 执行检索 (Pinecone 天然支持相似度和 MMR 排序检索)
+                    # 执行检索
                     if filter_rule:
                         docs = t["db"].similarity_search(prompt, **search_kwargs)
                         # --- 修改点：单篇模式下，额外获取 SS 真实元数据以增强问答 ---
@@ -1359,7 +1382,7 @@ with tab_track:
 with tab_notes:
     st.subheader("📌 我的笔记库")
     if not st.session_state.notes:
-        st.info("还没有笔记。在「研读空间」提问后点击「保存没笔记」即可积累。")
+        st.info("还没有笔记。在「研读空间」提问后点击「保存为笔记」即可积累。")
     else:
         all_tags   = sorted(set(tag for n in st.session_state.notes for tag in n["tags"]))
         all_topics = sorted(set(n["topic"] for n in st.session_state.notes))
