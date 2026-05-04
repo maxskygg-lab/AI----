@@ -18,4 +18,6 @@ langchain-google-genai>=2.0.0
 google-generativeai>=0.8.0
 sentence-transformers
 langchain-pinecone
-pinecone-client
+pinecone>=5.0.0
+torch==2.11.0
+torchvision>=0.16.0
