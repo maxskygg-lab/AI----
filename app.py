@@ -463,6 +463,8 @@ def tracker_check_one(keyword: str, since_date: str | None = None) -> list:
     try:
         cutoff = datetime.fromisoformat(since_date) if since_date else datetime.now() - timedelta(days=7)
         refined = keyword
+        if " " in keyword and "AND" not in keyword and '"' not in keyword:
+            refined = " AND ".join([f'(ti:{w} OR abs:{w})' for w in keyword.split()])
         results = list(arxiv.Search(
             query=refined, max_results=30,
             sort_by=arxiv.SortCriterion.SubmittedDate
@@ -688,8 +690,13 @@ with tab_main:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
-                # --- 修改点：移除了导致无法精准匹配的 AND 强制逻辑组合 ---
+                # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
                 refined = search_query
+                if " " in search_query and "AND" not in search_query and '"' not in search_query:
+                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
+                    refined = " AND ".join([f'all:{w}' for w in search_query.split()])
+                else:
+                    refined = f"({refined})"
 
                 if category_options[selected_category]:
                     refined += f" AND cat:{category_options[selected_category]}"
