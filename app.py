@@ -917,15 +917,22 @@ with tab_main:
                 st.rerun()
                 
         with col_pdf:
-            dl_num = st.number_input("📦 **下载原文数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_n")
-            if st.button(f"🔄 打包 ZIP (前 {dl_num} 篇)", use_container_width=True):
+            st.write("📦 **下载原文范围 (篇)**")
+            c_dl_1, c_dl_2 = st.columns(2)
+            with c_dl_1:
+                dl_start = st.number_input("从第", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=1, step=1, key="batch_dl_start")
+            with c_dl_2:
+                dl_end = st.number_input("到第", min_value=dl_start, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_end")
+            
+            if st.button(f"🔄 打包 ZIP ({dl_start}-{dl_end} 篇)", use_container_width=True):
                 # ==========================
                 # --- 新修改点：重构打包逻辑，开启真实硬盘流式传输，彻底防止内存崩溃 ---
                 # ==========================
                 import zipfile
                 # 使用硬盘临时文件替代内存缓冲
                 temp_zip_path = os.path.join(tempfile.gettempdir(), f"arxiv_batch_{uuid.uuid4().hex[:8]}.zip")
-                to_dl = st.session_state.search_results[:dl_num]
+                to_dl = st.session_state.search_results[dl_start-1 : dl_end]
+                dl_total = len(to_dl)
                 
                 # 使用状态文本与进度条，保证网页实时与后台通讯
                 status_text = st.empty()
@@ -934,25 +941,26 @@ with tab_main:
                 with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for idx, item in enumerate(to_dl):
                         res = item['obj']
-                        status_text.text(f"📥 正在提取并压缩 ({idx+1}/{dl_num}): {res.title[:25]}...")
+                        status_text.text(f"📥 正在提取并压缩 ({idx+1}/{dl_total}): {res.title[:25]}...")
                         try:
                             # 增加 1.5 秒安全休眠，防高并发触发 ArXiv 的防 DDoS 封锁
                             time.sleep(1.5)
                             p_path = download_arxiv_pdf_direct(res.entry_id)
                             safe_title = re.sub(r'[\\/*?:"<>|]', "", res.title)[:50]
-                            filename = f"{idx+1}_{safe_title}.pdf"
+                            # 文件名加上原始排名序号，方便对应
+                            filename = f"{dl_start + idx}_{safe_title}.pdf"
                             zf.write(p_path, arcname=filename)
                             os.remove(p_path) 
                         except Exception as e:
                             pass 
                         # 每次循环更新进度，维持前端存活
-                        progress_bar.progress((idx + 1) / dl_num)
+                        progress_bar.progress((idx + 1) / dl_total)
                 
                 status_text.text("✅ 打包完成！正在生成最终下载链接...")
                 
                 # 保留文件路径，而不是将几百兆数据塞进内存变量
                 st.session_state.ready_zip_path = temp_zip_path
-                st.session_state.ready_zip_name = f"ArXiv_PDFs_Top{dl_num}_{datetime.now().strftime('%m%d_%H%M')}.zip"
+                st.session_state.ready_zip_name = f"ArXiv_PDFs_{dl_start}to{dl_end}_{datetime.now().strftime('%m%d_%H%M')}.zip"
                 # ==========================
                 # --- 新修改点结束 ---
                 # ==========================
