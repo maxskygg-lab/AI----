@@ -922,7 +922,7 @@ with tab_main:
             with c_dl_1:
                 dl_start = st.number_input("从第", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=1, step=1, key="batch_dl_start")
             with c_dl_2:
-                dl_end = st.number_input("到第", min_value=dl_start, max_value=max(1, len(st.session_state.search_results)), value=min(10, len(st.session_state.search_results)), step=1, key="batch_dl_end")
+                dl_end = st.number_input("到第", min_value=dl_start, max_value=max(dl_start, len(st.session_state.search_results)), value=max(dl_start, min(dl_start + 9, len(st.session_state.search_results))), step=1, key="batch_dl_end")
             
             if st.button(f"🔄 打包 ZIP ({dl_start}-{dl_end} 篇)", use_container_width=True):
                 # ==========================
