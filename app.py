@@ -359,7 +359,8 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
     # 此处已移除对 st.session_state 的直接读写，变为纯函数，防止多线程崩溃
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
-        url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount"
+        # 向 Semantic Scholar 请求时增加了 year 字段，获取真实发表年份
+        url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount,year"
         headers = {"x-api-key": ss_key} if ss_key else {}
         ss_info = ""
         try:
@@ -368,16 +369,37 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
                 data = r.json()
                 tldr = data.get("tldr", {}).get("text", "无") if data.get("tldr") else "无"
                 inf_cites = data.get("influentialCitationCount", 0)
-                ss_info = f"\n\nSemantic Scholar真实数据：\n- 极具影响力引用数: {inf_cites}\n- TLDR极简摘要: {tldr}"
+                pub_year = data.get("year", "未知年份")
+                ss_info = f"\n\n【Semantic Scholar 真实辅助数据】\n- 发表年份: {pub_year}\n- 极具影响力引用数: {inf_cites}\n- 官方TLDR摘要: {tldr}"
         except: pass
 
-        llm = get_deepseek_llm(api_key, temperature=0.1)
+        # 锁定 temperature 为 0.0，杜绝大模型随机性，严格执行量表
+        llm = get_deepseek_llm(api_key, temperature=0.0)
         prompt = (
-            f"请根据这篇论文的信息对其进行综合打分（满分100分）。\n"
-            f"【评分优化标准】：\n"
-            f"1. 如果是经典老论文，请重点看重其真实影响力指标（引用量），不要因为年份久远扣分。\n"
-            f"2. 如果是最新论文（引用量往往为0），这是正常的，请重点评估其摘要体现的创新性和解决的痛点，切勿因为0引用而打低分。\n"
-            f"请严格按照此格式输出：【xx分】一句话理由（不超过30字）。\n\n"
+            f"你现在是一位顶尖人工智能领域的资深论文导师（如NeurIPS/CVPR领域主席视角）。请你以极其严苛、专业但具备前瞻性的眼光，对这篇论文进行综合打分（满分100分）。\n"
+            f"你的任务是【打破分数同质化】，坚决把水文和神作的分数彻底拉开！请严格遵守以下量化标准：\n\n"
+            f"【学术打分量表（满分100）】：\n"
+            f"1. 核心创新与突破性 (40分)：\n"
+            f"   - 35-40分：提出颠覆性架构、解决领域重大遗留问题、具有极高启发的全新范式。\n"
+            f"   - 25-34分：有扎实的创新点，对SOTA有显著改进，或提出非常有价值的新数据集。\n"
+            f"   - 15-24分：常规的渐进式改进（缝合怪、微调参数），属于缺乏惊艳感的工业流水线文章。\n"
+            f"   - 0-14分：毫无新意、动机不纯或仅仅是已有方法的生硬套用。\n"
+            f"2. 方法严谨度与可信度 (30分)：\n"
+            f"   - 25-30分：摘要中明确列出了具体的量化提升指标（如准确率提升XX%）、对比了强力基线，甚至提到了开源计划。\n"
+            f"   - 15-24分：提到了效果提升，但缺乏具体的核心数据指标支撑，描述偏笼统。\n"
+            f"   - 0-14分：通篇假大空，完全没有提及具体实验结果或如何验证。\n"
+            f"3. 学术影响力与时效潜力 (30分)：\n"
+            f"   - 若是经典老文（发表已满2年）：极具影响力引用数≥50得30分；≥10得20分；0引用得0分。\n"
+            f"   - 若是前沿新文（近1-2年）：无视0引用的劣势！请凭借你导师的毒辣眼光，根据其研究方向的“热门程度”直接给 15-30 的潜力分。\n\n"
+            f"【最终定档与输出规范】：\n"
+            f"计算完上述三项得分相加后，请对标以下档位：\n"
+            f"⭐️ 90-100分：Oral/Spotlight级别神作，必读。\n"
+            f"⭐️ 75-89分：扎实的Poster级别好文，值得跟进。\n"
+            f"⭐️ 60-74分：边缘平庸文，随便看看即可。\n"
+            f"⭐️ 60分以下：低质水文，浪费时间。\n\n"
+            f"【严格输出格式】：\n"
+            f"禁止输出你的计算过程、禁止输出拆项得分。只允许输出一行字：\n"
+            f"【xx分】导师点评：一句话犀利指出核心优缺点（需一针见血，不超过30个汉字）。\n\n"
             f"标题：{title}\n摘要：{abstract[:600]}{ss_info}"
         )
         res = llm.invoke(prompt)
