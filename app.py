@@ -675,20 +675,28 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
-    # --- 修改点：增加权重自定义选择框列 ---
-    sq1,sq2,sq3 = st.columns([3,2,2])
+    # --- 修改点：恢复两列布局，去掉独立的下拉框 ---
+    sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
-    with sq3:
-        # 新增自定义权重选择
-        weight_mode = st.selectbox("权重配比", ["相关 20% : 质量 80%", "相关 40% : 质量 60%", "相关 50% : 质量 50%", "相关 60% : 质量 40%", "相关 80% : 质量 20%"], index=0, label_visibility="collapsed")
-        # 提取动态权重数字
-        nums = re.findall(r'\d+', weight_mode)
-        rel_w = float(nums[0]) / 100.0
-        qual_w = float(nums[1]) / 100.0
+
+    # --- 修改点开始：将固定下拉框改为动态任意比例滑块，并与左侧模式深度绑定 ---
+    rel_w = 1.0
+    qual_w = 0.0
+    if sort_mode in ["🌟 综合(相关+质量)", "💎 质量优先"]:
+        # 根据选择的模式，给予不同的初始滑块位置（综合默认60%，质量优先默认20%）
+        default_rel = 60 if "综合" in sort_mode else 20
+        rel_weight_pct = st.slider(
+            "⚖️ 自定义权重配比 (任意调节，左拉看重质量，右拉看重相关性)",
+            min_value=0, max_value=100, value=default_rel, step=1,
+            format="相关性 %d%%"
+        )
+        rel_w = rel_weight_pct / 100.0
+        qual_w = 1.0 - rel_w
+        st.caption(f"💡 当前计算规则：总分 = (相关性分数 × **{rel_w:.2f}**) + (AI质量分 × **{qual_w:.2f}**)")
     # --- 修改点结束 ---
 
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
@@ -790,7 +798,7 @@ with tab_main:
                         elif age == 2: time_bonus = 10
                         
                         quality_score = min(100.0, cite_score + time_bonus)
-                        # --- 修改点：使用提取的动态自定义权重 ---
+                        # --- 修改点：使用滑块动态提取的自定义权重 ---
                         item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                 elif "综合" in sort_mode:
@@ -811,7 +819,7 @@ with tab_main:
                         time_bonus = max(0, 30 - age * 10)
                         
                         quality_score = min(100.0, cite_score + time_bonus)
-                        # --- 修改点：使用提取的动态自定义权重 ---
+                        # --- 修改点：使用滑块动态提取的自定义权重 ---
                         item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                     
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
@@ -1092,7 +1100,7 @@ with tab_main:
                             elif age == 2: time_bonus = 10
                             
                             quality_score = min(100.0, cite_score + time_bonus)
-                            # --- 修改点：使用提取的动态自定义权重 ---
+                            # --- 修改点：使用滑块动态提取的自定义权重 ---
                             item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     elif "综合" in sort_mode:
@@ -1113,7 +1121,7 @@ with tab_main:
                             time_bonus = max(0, 30 - age * 10)
                             
                             quality_score = min(100.0, cite_score + time_bonus)
-                            # --- 修改点：使用提取的动态自定义权重 ---
+                            # --- 修改点：使用滑块动态提取的自定义权重 ---
                             item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                             
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
