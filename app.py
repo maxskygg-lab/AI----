@@ -375,30 +375,24 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
 
         # 锁定 temperature 为 0.0，杜绝大模型随机性，严格执行量表
         llm = get_deepseek_llm(api_key, temperature=0.0)
+        # --- 修改点：优化打分 prompt，缓和极端低分，提高区分度以解决分数雷同问题 ---
         prompt = (
-            f"你现在是一位顶尖人工智能领域的资深论文导师（如NeurIPS/CVPR领域主席视角）。请你以极其严苛、专业但具备前瞻性的眼光，对这篇论文进行综合打分（满分100分）。\n"
-            f"你的任务是【打破分数同质化】，坚决把水文和神作的分数彻底拉开！请严格遵守以下量化标准：\n\n"
+            f"你现在是一位顶尖人工智能领域的资深论文导师。请你结合给定信息，客观且富有区分度地对这篇论文进行综合打分（满分100分）。\n"
+            f"当前的打分常常偏低且雷同，请仔细发掘论文的细节和创新点，充分利用整个分数段（不要刻意压低分数），拉开合理的差距。\n\n"
             f"【学术打分量表（满分100）】：\n"
             f"1. 核心创新与突破性 (40分)：\n"
-            f"   - 35-40分：提出颠覆性架构、解决领域重大遗留问题、具有极高启发的全新范式。\n"
-            f"   - 25-34分：有扎实的创新点，对SOTA有显著改进，或提出非常有价值的新数据集。\n"
-            f"   - 15-24分：常规的渐进式改进（缝合怪、微调参数），属于缺乏惊艳感的工业流水线文章。\n"
-            f"   - 0-14分：毫无新意、动机不纯或仅仅是已有方法的生硬套用。\n"
+            f"   - 35-40分：提出颠覆性架构或解决领域重大难题。\n"
+            f"   - 28-34分：有扎实的创新点，对SOTA有显著改进，或提供高价值数据集。\n"
+            f"   - 20-27分：常规的渐进式改进，逻辑自洽，具备一定的实用价值。\n"
+            f"   - 0-19分：创新性较弱，单纯的模块拼接或方法套用。\n"
             f"2. 方法严谨度与可信度 (30分)：\n"
-            f"   - 25-30分：摘要中明确列出了具体的量化提升指标（如准确率提升XX%）、对比了强力基线，甚至提到了开源计划。\n"
-            f"   - 15-24分：提到了效果提升，但缺乏具体的核心数据指标支撑，描述偏笼统。\n"
-            f"   - 0-14分：通篇假大空，完全没有提及具体实验结果或如何验证。\n"
+            f"   - 25-30分：摘要明确列出量化指标、对比了强基线，提及开源或详尽实验验证。\n"
+            f"   - 18-24分：提到实验效果提升，有合理的数据支持，但描述偏向概括。\n"
+            f"   - 0-17分：缺乏具体数据指标支撑，结论偏主观或含糊。\n"
             f"3. 学术影响力与时效潜力 (30分)：\n"
-            f"   - 若是经典老文（发表已满2年）：极具影响力引用数≥50得30分；≥10得20分；0引用得0分。\n"
-            f"   - 若是前沿新文（近1-2年）：无视0引用的劣势！请凭借你导师的毒辣眼光，根据其研究方向的“热门程度”直接给 15-30 的潜力分。\n\n"
+            f"   - 综合发表年份、引用量（如有）以及研究方向的前沿热门程度给分。高引或极具潜力的热门方向给 22-30分；常规方向或普通跟进型研究给 15-21分；冷门且低引给0-14分。\n\n"
             f"【最终定档与输出规范】：\n"
-            f"计算完上述三项得分相加后，请对标以下档位：\n"
-            f"⭐️ 90-100分：Oral/Spotlight级别神作，必读。\n"
-            f"⭐️ 75-89分：扎实的Poster级别好文，值得跟进。\n"
-            f"⭐️ 60-74分：边缘平庸文，随便看看即可。\n"
-            f"⭐️ 60分以下：低质水文，浪费时间。\n\n"
-            f"【严格输出格式】：\n"
-            f"禁止输出你的计算过程、禁止输出拆项得分。只允许输出一行字：\n"
+            f"禁止输出计算过程、禁止输出拆项得分。只允许输出一行字：\n"
             f"【xx分】导师点评：一句话犀利指出核心优缺点（需一针见血，不超过30个汉字）。\n\n"
             f"标题：{title}\n摘要：{abstract[:600]}{ss_info}"
         )
@@ -681,12 +675,21 @@ tab_main, tab_read, tab_track, tab_notes = st.tabs([
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
-    sq1,sq2 = st.columns([4,2])
+    # --- 修改点：增加权重自定义选择框列 ---
+    sq1,sq2,sq3 = st.columns([3,2,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
+    with sq3:
+        # 新增自定义权重选择
+        weight_mode = st.selectbox("权重配比", ["相关 20% : 质量 80%", "相关 40% : 质量 60%", "相关 50% : 质量 50%", "相关 60% : 质量 40%", "相关 80% : 质量 20%"], index=0, label_visibility="collapsed")
+        # 提取动态权重数字
+        nums = re.findall(r'\d+', weight_mode)
+        rel_w = float(nums[0]) / 100.0
+        qual_w = float(nums[1]) / 100.0
+    # --- 修改点结束 ---
 
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
         adv1, adv2 = st.columns(2)
@@ -787,8 +790,8 @@ with tab_main:
                         elif age == 2: time_bonus = 10
                         
                         quality_score = min(100.0, cite_score + time_bonus)
-                        # 质量绝对主导(80%)，但必须有相关性(20%)作为约束
-                        item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
+                        # --- 修改点：使用提取的动态自定义权重 ---
+                        item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                 elif "综合" in sort_mode:
                     import math
@@ -808,7 +811,8 @@ with tab_main:
                         time_bonus = max(0, 30 - age * 10)
                         
                         quality_score = min(100.0, cite_score + time_bonus)
-                        item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                        # --- 修改点：使用提取的动态自定义权重 ---
+                        item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                     
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                 
@@ -1088,7 +1092,8 @@ with tab_main:
                             elif age == 2: time_bonus = 10
                             
                             quality_score = min(100.0, cite_score + time_bonus)
-                            item["total_score"] = (rel_score * 0.2) + (quality_score * 0.8)
+                            # --- 修改点：使用提取的动态自定义权重 ---
+                            item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     elif "综合" in sort_mode:
                         import math
@@ -1108,7 +1113,8 @@ with tab_main:
                             time_bonus = max(0, 30 - age * 10)
                             
                             quality_score = min(100.0, cite_score + time_bonus)
-                            item["total_score"] = (rel_score * 0.6) + (quality_score * 0.4)
+                            # --- 修改点：使用提取的动态自定义权重 ---
+                            item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                             
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                     st.rerun()
