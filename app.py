@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os, time, tempfile, re, math, uuid, itertools, io
 import arxiv, requests
+import numpy as np # <--- 【修改点 1：新增 numpy 库，用于在内存中进行高效的向量矩阵余弦相似度计算】
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -181,6 +182,7 @@ def convert_to_excel(results):
             "引用数": item.get('citations', 0),
             "核心贡献 (AI)": contrib,
             "综合评分 (AI)": score,  # --- 修改点 1：将打分情况塞进 Excel 的行数据里 ---
+            "真实语义相似度": round(item.get('sim_score', 0), 2), # <--- 【修改点 2：在导出的 Excel 中新增“真实语义相似度”列，保留两位小数】
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
@@ -203,8 +205,9 @@ def convert_to_excel(results):
         worksheet.set_column('E:E', 50, cell_fmt)
         # --- 修改点 1：新增第F列留给综合评分，把原来的G列、H列顺延排好防挤压 ---
         worksheet.set_column('F:F', 30, cell_fmt)
-        worksheet.set_column('G:G', 30, cell_fmt)
-        worksheet.set_column('H:H', 60, cell_fmt)
+        worksheet.set_column('G:G', 15, num_fmt) # <--- 【修改点 2：为新增的真实语义相似度列调整列宽和格式】
+        worksheet.set_column('H:H', 30, cell_fmt)
+        worksheet.set_column('I:I', 60, cell_fmt)
         
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_fmt)
@@ -637,7 +640,7 @@ with tab_main:
         )
         rel_w = rel_weight_pct / 100.0
         qual_w = 1.0 - rel_w
-        st.caption(f"💡 当前计算规则：总分 = (相关性分数 × **{rel_w:.2f}**) + (AI质量分 × **{qual_w:.2f}**)")
+        st.caption(f"💡 当前计算规则：总分 = (真实语义分 × **{rel_w:.2f}**) + (AI质量分 × **{qual_w:.2f}**)") # <--- 【修改点 3：更新提示文案】
     # --- 修改点结束 ---
 
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
@@ -704,6 +707,30 @@ with tab_main:
                     st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
                 
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
+                
+                # <--- 【修改点 4：在此处批量计算这 100 篇论文与关键词的真实语义余弦相似度】 --->
+                if st.session_state.search_results:
+                    with st.spinner("正在利用本地向量模型进行底层语义匹配打分..."):
+                        try:
+                            embeddings_model = get_embeddings_model()
+                            # 1. 向量化用户搜索词
+                            query_vec = np.array(embeddings_model.embed_query(search_query))
+                            # 2. 批量提取摘要并向量化
+                            abstracts = [item['obj'].summary for item in st.session_state.search_results]
+                            doc_vecs = np.array(embeddings_model.embed_documents(abstracts))
+                            # 3. 计算余弦相似度公式: (A·B) / (||A|| * ||B||)
+                            norms_doc = np.linalg.norm(doc_vecs, axis=1)
+                            norm_query = np.linalg.norm(query_vec)
+                            similarities = np.dot(doc_vecs, query_vec) / (norms_doc * norm_query)
+                            # 4. 将真实分数转为百分制并写回字典
+                            for idx, item in enumerate(st.session_state.search_results):
+                                item['sim_score'] = float(similarities[idx]) * 100 
+                        except Exception as e:
+                            st.warning(f"本地语义计算异常，将降级使用基础分: {e}")
+                            for item in st.session_state.search_results:
+                                item['sim_score'] = 50.0 # 失败兜底分
+                # <--- 【修改点 4 结束】 --->
+
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
                 st.session_state.focus_paper_id = None
@@ -718,52 +745,35 @@ with tab_main:
                 
                 if "引用量" in sort_mode:
                     st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                elif "质量优先" in sort_mode:
+                elif "质量优先" in sort_mode or "综合" in sort_mode:
                     import math
                     current_year = datetime.now().year
                     for idx, item in enumerate(st.session_state.search_results):
-                        # 引入基础相关性兜底 (20%权重)，防止无关的超高引文霸榜
-                        if idx < 10: rel_score = 100
-                        elif idx < 20: rel_score = 85
-                        elif idx < 30: rel_score = 70
-                        else: rel_score = 50
+                        # <--- 【修改点 5：废弃伪相关性硬编码（if idx < 10 等），直接读取真实向量匹配分】 --->
+                        rel_score = item.get('sim_score', 50.0)
                         
                         cites = item["citations"] or 0
                         cite_score = (math.log10(cites + 1) / 3.0) * 100
                         
                         pub_year = item['obj'].published.year
                         age = max(0, current_year - pub_year)
-                        time_bonus = 0
-                        if age == 0: time_bonus = 40
-                        elif age == 1: time_bonus = 20
-                        elif age == 2: time_bonus = 10
                         
+                        # 针对不同模式计算时效补偿
+                        if "质量优先" in sort_mode:
+                            time_bonus = 0
+                            if age == 0: time_bonus = 40
+                            elif age == 1: time_bonus = 20
+                            elif age == 2: time_bonus = 10
+                        else:
+                            time_bonus = max(0, 30 - age * 10)
+                            
                         quality_score = min(100.0, cite_score + time_bonus)
-                        # --- 修改点：使用滑块动态提取的自定义权重 ---
-                        item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
-                    st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                elif "综合" in sort_mode:
-                    import math
-                    current_year = datetime.now().year
-                    max_items = len(st.session_state.search_results)
-                    for idx, item in enumerate(st.session_state.search_results):
-                        if idx < 10: rel_score = 100
-                        elif idx < 20: rel_score = 85
-                        elif idx < 30: rel_score = 70
-                        else: rel_score = 50
-
-                        cites = item["citations"] or 0
-                        cite_score = (math.log10(cites + 1) / 3.0) * 100
                         
-                        pub_year = item['obj'].published.year
-                        age = max(0, current_year - pub_year)
-                        time_bonus = max(0, 30 - age * 10)
-                        
-                        quality_score = min(100.0, cite_score + time_bonus)
-                        # --- 修改点：使用滑块动态提取的自定义权重 ---
+                        # 融合真实语义分与质量分
                         item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
-                    
+                        
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                # <--- 【修改点 5 结束】 --->
                 
                 st.session_state.citations_loaded = True
             
@@ -961,9 +971,11 @@ with tab_main:
             cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
+                # <--- 【修改点 6：在每篇论文展开的标题栏，同时显示刚刚算出来的真实向量分数】 --->
+                sim_display = f" | 🎯 匹配度: {round(item.get('sim_score', 0), 1)}%"
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
-                    f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}",
+                    f"{res.published.strftime('%Y-%m-%d')} | 引用：{cite_html}{sim_display}",
                     unsafe_allow_html=True
                 )
                 ck = res.title[:60]
@@ -1009,11 +1021,28 @@ with tab_main:
         st.markdown("---")
         # --- 修改点：按钮文案同步修改为 100 篇 ---
         if st.button("🔽 加载更多 100 篇...", use_container_width=True):
-            with st.spinner("正在拉取新论文摘要..."):
+            with st.spinner("正在拉取新论文摘要并计算语义分数..."):
                 # --- 修改点：每次额外拉取数量提升到 100 ---
                 more_raw = list(itertools.islice(st.session_state.search_generator, 100))
                 if more_raw:
                     new_results = [{"obj": r, "citations": None} for r in more_raw]
+                    
+                    # <--- 【修改点 7：在“加载更多”时，也必须对这新来的 100 篇计算真实的语义分数】 --->
+                    try:
+                        embeddings_model = get_embeddings_model()
+                        query_vec = np.array(embeddings_model.embed_query(search_query))
+                        abstracts = [item['obj'].summary for item in new_results]
+                        doc_vecs = np.array(embeddings_model.embed_documents(abstracts))
+                        norms_doc = np.linalg.norm(doc_vecs, axis=1)
+                        norm_query = np.linalg.norm(query_vec)
+                        similarities = np.dot(doc_vecs, query_vec) / (norms_doc * norm_query)
+                        for idx, item in enumerate(new_results):
+                            item['sim_score'] = float(similarities[idx]) * 100 
+                    except Exception as e:
+                        for item in new_results:
+                            item['sim_score'] = 50.0 
+                    # <--- 【修改点 7 结束】 --->
+
                     id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
                     for item in new_results:
                         item["citations"] = id2c.get(item['obj'].entry_id, 0)
@@ -1021,48 +1050,28 @@ with tab_main:
                     
                     if "引用量" in sort_mode:
                         st.session_state.search_results.sort(key=lambda x: x["citations"] or 0, reverse=True)
-                    elif "质量优先" in sort_mode:
+                    elif "质量优先" in sort_mode or "综合" in sort_mode:
                         import math
                         current_year = datetime.now().year
                         for idx, item in enumerate(st.session_state.search_results):
-                            if idx < 10: rel_score = 100
-                            elif idx < 20: rel_score = 85
-                            elif idx < 30: rel_score = 70
-                            else: rel_score = 50
+                            # <--- 【修改点 8：废弃伪相关性，应用真实分数】 --->
+                            rel_score = item.get('sim_score', 50.0)
                             
                             cites = item["citations"] or 0
                             cite_score = (math.log10(cites + 1) / 3.0) * 100
                             
                             pub_year = item['obj'].published.year
                             age = max(0, current_year - pub_year)
-                            time_bonus = 0
-                            if age == 0: time_bonus = 40
-                            elif age == 1: time_bonus = 20
-                            elif age == 2: time_bonus = 10
                             
+                            if "质量优先" in sort_mode:
+                                time_bonus = 0
+                                if age == 0: time_bonus = 40
+                                elif age == 1: time_bonus = 20
+                                elif age == 2: time_bonus = 10
+                            else:
+                                time_bonus = max(0, 30 - age * 10)
+                                
                             quality_score = min(100.0, cite_score + time_bonus)
-                            # --- 修改点：使用滑块动态提取的自定义权重 ---
-                            item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
-                        st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                    elif "综合" in sort_mode:
-                        import math
-                        current_year = datetime.now().year
-                        max_items = len(st.session_state.search_results)
-                        for idx, item in enumerate(st.session_state.search_results):
-                            if idx < 10: rel_score = 100
-                            elif idx < 20: rel_score = 85
-                            elif idx < 30: rel_score = 70
-                            else: rel_score = 50
-                            
-                            cites = item["citations"] or 0
-                            cite_score = (math.log10(cites + 1) / 3.0) * 100
-                            
-                            pub_year = item['obj'].published.year
-                            age = max(0, current_year - pub_year)
-                            time_bonus = max(0, 30 - age * 10)
-                            
-                            quality_score = min(100.0, cite_score + time_bonus)
-                            # --- 修改点：使用滑块动态提取的自定义权重 ---
                             item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                             
                         st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
