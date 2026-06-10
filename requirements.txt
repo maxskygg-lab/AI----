@@ -8,7 +8,7 @@ langchain-pinecone>=0.1.0
 langchain-google-genai>=2.0.0
 google-generativeai>=0.8.0
 pinecone>=5.0.0
-arxiv
+arxiv>=1.4.0
 pymupdf
 faiss-cpu
 pypdf
