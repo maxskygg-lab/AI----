@@ -668,12 +668,8 @@ with tab_main:
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
                 # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
+                # 修复逻辑：移除会导致 ArXiv 检索不到最匹配结果的 AND 强制重组逻辑
                 refined = search_query
-                if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
-                    refined = " AND ".join([f'all:{w}' for w in search_query.split()])
-                else:
-                    refined = f"({refined})"
 
                 if category_options[selected_category]:
                     refined += f" AND cat:{category_options[selected_category]}"
@@ -691,7 +687,10 @@ with tab_main:
                 for attempt in range(max_retries):
                     try:
                         # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
-                        raw_gen = arxiv.Search(query=refined, max_results=2000, sort_by=asort).results()
+                        # 修复 arxiv 报错：适配新版 API，使用 Client 对象执行搜索
+                        search_req = arxiv.Search(query=refined, max_results=2000, sort_by=asort)
+                        client = arxiv.Client()
+                        raw_gen = client.results(search_req)
                         st.session_state.search_generator = raw_gen
                         # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
                         raw = list(itertools.islice(raw_gen, 100))
