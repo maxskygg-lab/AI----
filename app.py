@@ -135,6 +135,10 @@ for k, v in defaults.items():
 
 # ================= 4. 工具函数 =================
 
+# --- 新增修改点：将包含中文的主题名安全转换为 Pinecone 要求的纯 ASCII Namespace ---
+def get_safe_namespace(name):
+    return "ns_" + name.encode('utf-8').hex()
+
 # --- 新增：直接下载 ArXiv PDF，提高效率 ---
 def download_arxiv_pdf_direct(arxiv_id):
     clean_id = get_pure_arxiv_id(arxiv_id)
@@ -434,8 +438,8 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
         
         if t["db"] is None:
-            # 初始化连接云端索引，按主题划分 namespace
-            t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=topic_name)
+            # --- 新增修改点：使用 get_safe_namespace(topic_name) 避免中文 namespace 触发 400 错误 ---
+            t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=get_safe_namespace(topic_name))
             
         # 直接向 Pinecone 批量添加文档向量
         for i in range(0, len(chunks), batch):
@@ -461,7 +465,8 @@ def rebuild_topic_index(topic_name, api_key):
     import os
     if PINECONE_API_KEY:
         os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
-    t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=topic_name)
+    # --- 新增修改点：使用 get_safe_namespace(topic_name) 转换为纯 ASCII 命名空间 ---
+    t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=get_safe_namespace(topic_name))
 
 def detect_knowledge_gap(answer_text, docs):
     sigs = ["资料不足","没有找到","无法回答","未提及","不清楚","没有相关","cannot find","not mentioned"]
@@ -590,10 +595,10 @@ with st.sidebar:
                         except Exception: pass
                     rebuild_topic_index(st.session_state.active_topic, user_api_key); st.rerun()
         if st.button("🗑️ 清空主题", type="primary"):
-            # --- 修改点：连带清空 Pinecone 该主题的 namespace ---
+            # --- 修改点：连带清空 Pinecone 该主题的 namespace（已增加 get_safe_namespace 转换） ---
             if ts["db"]:
                 try:
-                    ts["db"].delete(delete_all=True, namespace=st.session_state.active_topic)
+                    ts["db"].delete(delete_all=True, namespace=get_safe_namespace(st.session_state.active_topic))
                 except Exception: pass
             ts["files"],ts["chunks"],ts["db"] = [],[],None
             st.session_state.chat_history = []; st.rerun()
