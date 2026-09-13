@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import os, time, tempfile, re, math, uuid, itertools, io
 import arxiv, requests
-import numpy as np # <--- 【修改点 1：新增 numpy 库，用于在内存中进行高效的向量矩阵余弦相似度计算】
+import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -10,17 +10,13 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # ================= 1. 环境检查与导入 =================
 try:
     import langchain_community, fitz
-    # --- 修改点：引入 OpenAI 接口适配 DeepSeek 和 HuggingFace 免费向量 ---
     from langchain_openai import ChatOpenAI
     from langchain_community.embeddings import HuggingFaceEmbeddings
-    # --- 修改点：引入 Pinecone 云端向量数据库 ---
     from langchain_pinecone import PineconeVectorStore
 except ImportError as e:
     st.error(f"🚑 环境缺失库 -> {e.name}. 请运行: pip install langchain-openai sentence-transformers pymupdf langchain-pinecone pinecone-client")
     st.stop()
-
 from langchain_community.document_loaders import PyPDFLoader
-# from langchain_community.vectorstores import FAISS # --- 修改点：移除本地 FAISS 占位 ---
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================= 2. 页面配置 =================
@@ -94,19 +90,14 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
 st.title("📖 AI 深度研读助手 v5 (DeepSeek Kernel)")
 
 # ================= API Key =================
-# --- 修改点：适配 DeepSeek Key ---
 try:
     USER_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
 except:
-    USER_API_KEY = "" # 避免报错，可在侧边栏提示用户
-
+    USER_API_KEY = ""
 SS_API_KEY = st.secrets.get("SS_API_KEY", "")
-
-# --- 修改点：新增 Pinecone 配置 ---
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 PINECONE_INDEX_NAME = st.secrets.get("PINECONE_INDEX_NAME", "arxiv-papers")
 
@@ -119,7 +110,7 @@ defaults = {
     "suggested_query":        "",
     "focus_paper_id":         None,
     "contributions_cache":    {},
-    "score_cache":            {}, # --- 修改点：新增打分缓存 ---
+    "score_cache":            {},
     "chat_history":           [],
     "topics":                 {"默认主题": {"files": [], "chunks": [], "db": None}},
     "active_topic":           "默认主题",
@@ -134,22 +125,22 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # ================= 4. 工具函数 =================
-
-# --- 新增修改点：将包含中文的主题名安全转换为 Pinecone 要求的纯 ASCII Namespace ---
 def get_safe_namespace(name):
     return "ns_" + name.encode('utf-8').hex()
 
-# --- 新增：直接下载 ArXiv PDF，提高效率 ---
 def download_arxiv_pdf_direct(arxiv_id):
     clean_id = get_pure_arxiv_id(arxiv_id)
     pdf_url = f"https://arxiv.org/pdf/{clean_id}.pdf"
     pdf_path = os.path.join(tempfile.gettempdir(), f"{clean_id}.pdf")
-    r = requests.get(pdf_url, timeout=15)
+    # 增加下载延迟，避免PDF下载也触发429
+    time.sleep(2.0)
+    r = requests.get(pdf_url, timeout=20, headers={
+        "User-Agent": "AI-Research-Assistant/1.0 (Academic Download)"
+    })
     with open(pdf_path, 'wb') as f:
         f.write(r.content)
     return pdf_path
 
-# --- 新增：DeepSeek 模型获取函数 ---
 def get_deepseek_llm(api_key, temperature=0.1):
     if not api_key:
         st.error("请先配置 DEEPSEEK_API_KEY"); st.stop()
@@ -160,7 +151,6 @@ def get_deepseek_llm(api_key, temperature=0.1):
         temperature=temperature
     )
 
-# --- 新增：免费 Embeddings 模型获取函数（带缓存） ---
 @st.cache_resource
 def get_embeddings_model():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -177,7 +167,6 @@ def convert_to_excel(results):
     for item in results:
         res = item['obj']
         contrib = st.session_state.contributions_cache.get(res.title[:60], "未生成")
-        # --- 修改点 1：在这里读取 session_state 中可能已经打好的分数 ---
         score = st.session_state.score_cache.get(res.title[:60], "未打分")
         data.append({
             "标题": res.title,
@@ -185,8 +174,8 @@ def convert_to_excel(results):
             "年份": res.published.year,
             "引用数": item.get('citations', 0),
             "核心贡献 (AI)": contrib,
-            "综合评分 (AI)": score,  # --- 修改点 1：将打分情况塞进 Excel 的行数据里 ---
-            "真实语义相似度": round(item.get('sim_score', 0), 2), # <--- 【修改点 2：在导出的 Excel 中新增“真实语义相似度”列，保留两位小数】
+            "综合评分 (AI)": score,
+            "真实语义相似度": round(item.get('sim_score', 0), 2),
             "链接": res.entry_id,
             "摘要": res.summary.replace('\n', ' ')
         })
@@ -207,9 +196,8 @@ def convert_to_excel(results):
         worksheet.set_column('B:B', 20, cell_fmt)
         worksheet.set_column('C:D', 10, num_fmt)
         worksheet.set_column('E:E', 50, cell_fmt)
-        # --- 修改点 1：新增第F列留给综合评分，把原来的G列、H列顺延排好防挤压 ---
         worksheet.set_column('F:F', 30, cell_fmt)
-        worksheet.set_column('G:G', 15, num_fmt) # <--- 【修改点 2：为新增的真实语义相似度列调整列宽和格式】
+        worksheet.set_column('G:G', 15, num_fmt)
         worksheet.set_column('H:H', 30, cell_fmt)
         worksheet.set_column('I:I', 60, cell_fmt)
         
@@ -327,7 +315,6 @@ def fetch_graph_data(arxiv_id, ss_key=None):
             if attempt == 2: return None
     return None
 
-# --- 修改点：新增依据标题获取 SS 详细元数据的函数（用于增强问答） ---
 @st.cache_data(ttl=3600)
 def fetch_ss_paper_details_by_title(title, ss_key=None):
     clean_title = title.replace(".pdf", "").strip()
@@ -347,7 +334,6 @@ def get_one_line_contribution(abstract, title, api_key):
     if key in st.session_state.contributions_cache:
         return st.session_state.contributions_cache[key]
     try:
-        # --- 修改点：调用 DeepSeek ---
         llm = get_deepseek_llm(api_key, temperature=0.0)
         res = llm.invoke(
             f"请用一句话（不超过40个汉字或20个英文单词）总结这篇论文的核心创新贡献。"
@@ -359,12 +345,9 @@ def get_one_line_contribution(abstract, title, api_key):
     st.session_state.contributions_cache[key] = result
     return result
 
-# --- 修改点：新增依据 SS 真实数据的单篇论文打分函数 ---
 def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
-    # 此处已移除对 st.session_state 的直接读写，变为纯函数，防止多线程崩溃
     try:
         clean_id = get_pure_arxiv_id(arxiv_id)
-        # 向 Semantic Scholar 请求时增加了 year 字段，获取真实发表年份
         url = f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{clean_id}?fields=tldr,influentialCitationCount,year"
         headers = {"x-api-key": ss_key} if ss_key else {}
         ss_info = ""
@@ -378,10 +361,8 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
                 pub_year = data.get("year", "未知年份")
                 ss_info = f"\n\n【Semantic Scholar 真实辅助数据】\n- 发表年份: {pub_year}\n- 极具影响力引用数: {inf_cites}\n- 官方TLDR摘要: {tldr}"
         except: pass
-
-        # 锁定 temperature 为 0.0，杜绝大模型随机性，严格执行量表
+        
         llm = get_deepseek_llm(api_key, temperature=0.0)
-        # --- 修改点：优化打分 prompt，缓和极端低分，提高区分度以解决分数雷同问题 ---
         prompt = (
             f"你现在是一位顶尖人工智能领域的资深论文导师。请你结合给定信息，客观且富有区分度地对这篇论文进行综合打分（满分100分）。\n"
             f"当前的打分常常偏低且雷同，请仔细发掘论文的细节和创新点，充分利用整个分数段（不要刻意压低分数），拉开合理的差距。\n\n"
@@ -428,20 +409,16 @@ def process_and_add_to_topic(file_path, file_name, api_key, topic_name=None):
         chunks = [c for c in splitter.split_documents(docs) if len(c.page_content.strip()) > 20]
         t["chunks"].extend(chunks)
         
-        # --- 修改点：使用 HuggingFace 免费向量 ---
         embeddings = get_embeddings_model()
         
         batch = 10
-        # --- 修改点：连接并写入 Pinecone 云数据库 ---
         if not PINECONE_API_KEY:
             st.error("🚑 请先在 Streamlit Secrets 中配置 PINECONE_API_KEY"); return False
         os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
         
         if t["db"] is None:
-            # --- 新增修改点：使用 get_safe_namespace(topic_name) 避免中文 namespace 触发 400 错误 ---
             t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=get_safe_namespace(topic_name))
             
-        # 直接向 Pinecone 批量添加文档向量
         for i in range(0, len(chunks), batch):
             t["db"].add_documents(chunks[i:i+batch]); time.sleep(0.1)
             
@@ -459,13 +436,10 @@ def rebuild_topic_index(topic_name, api_key):
     t = st.session_state.topics[topic_name]
     if not t["chunks"]: t["db"] = None; return
     
-    # --- 修改点：使用 HuggingFace 免费向量 ---
     embeddings = get_embeddings_model()
-    # --- 修改点：重建索引时重新连接 Pinecone ---
     import os
     if PINECONE_API_KEY:
         os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
-    # --- 新增修改点：使用 get_safe_namespace(topic_name) 转换为纯 ASCII 命名空间 ---
     t["db"] = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=get_safe_namespace(topic_name))
 
 def detect_knowledge_gap(answer_text, docs):
@@ -481,20 +455,17 @@ def get_gap_recommendations():
     return [r for r in st.session_state.graph_references_cache
             if not any(r.get("title","")[:20].lower() in f.lower() for f in loaded)][:4]
 
-
 # ================= 5. 图谱渲染 =================
 def render_connected_graph(data, min_cite_filter=0):
     if not data: return None, {}
     nodes, edges, details = [], [], {}
     cur_year = 2026
-
     def color(year, rel):
         if not year or year == 'Unknown': return "#94a3b8"
         age = max(0, cur_year - int(year))
         if rel == 'seed': return "#FF4B4B"
         if rel == 'cite': return "#059669" if age<2 else "#10b981" if age<5 else "#6ee7b7"
         return "#2563eb" if age<2 else "#3b82f6" if age<5 else "#93c5fd"
-
     seed = data.get('paperId','root')
     details[seed] = {
         "title":    data.get('title','Seed Paper'),
@@ -507,11 +478,9 @@ def render_connected_graph(data, min_cite_filter=0):
     nodes.append(Node(id=seed, label="THIS PAPER", size=35, color=color(data.get('year'),'seed')))
     seen = {seed}
     refs_for_gap = []
-
     combined = []
     for p in data.get('references',[])[:20]: p['rel_type']='ref'; combined.append(p)
     for p in data.get('citations',[])[:20]:  p['rel_type']='cite'; combined.append(p)
-
     for item in combined:
         pid   = item.get('paperId')
         cites = item.get('citationCount',0) or 0
@@ -536,7 +505,6 @@ def render_connected_graph(data, min_cite_filter=0):
             edges.append(Edge(source=pid, target=seed, color="#d1d5db", width=1, dashed=True))
         else:
             edges.append(Edge(source=seed, target=pid, color="#94a3b8", width=1.5))
-
     st.session_state.graph_references_cache = refs_for_gap
     cfg = Config(width="100%", height=560, directed=True, physics=True,
                  nodeHighlightBehavior=True, highlightColor="#F7D154",
@@ -550,10 +518,8 @@ with st.sidebar:
     user_api_key = USER_API_KEY
     ss_api_key   = SS_API_KEY
     st.success("🚀 高速调研模式已激活")
-
     cache_sz = len(st.session_state.citations_global_cache)
     if cache_sz: st.info(f"⚡ 引用数缓存：{cache_sz} 篇")
-
     st.markdown("---")
     st.subheader("🗂️ 研究主题")
     tnames = list(st.session_state.topics.keys())
@@ -563,7 +529,6 @@ with st.sidebar:
         st.session_state.active_topic = chosen
         st.session_state.selected_scope = "🌐 对比所有论文"
         st.rerun()
-
     cn, ca = st.columns([3,1])
     with cn: new_tn = st.text_input("新建主题", placeholder="输入名称", label_visibility="collapsed")
     with ca:
@@ -572,12 +537,10 @@ with st.sidebar:
             if nm not in st.session_state.topics:
                 st.session_state.topics[nm] = {"files":[],"chunks":[],"db":None}
                 st.session_state.active_topic = nm; st.rerun()
-
     if len(st.session_state.topics) > 1:
         if st.button(f"🗑️ 删除「{st.session_state.active_topic}」"):
             del st.session_state.topics[st.session_state.active_topic]
             st.session_state.active_topic = list(st.session_state.topics.keys())[0]; st.rerun()
-
     ts = active_topic_data()
     if ts["files"]:
         st.markdown(f"**已入库（{len(ts['files'])}篇）**")
@@ -588,21 +551,18 @@ with st.sidebar:
                 if st.button("🗑️", key=f"del_{f}"):
                     ts["files"].remove(f)
                     ts["chunks"] = [c for c in ts["chunks"] if c.metadata.get('source_paper')!=f]
-                    # --- 修改点：同步删除 Pinecone 云端该论文的向量数据 ---
                     if ts["db"]:
                         try:
                             ts["db"].delete(filter={"source_paper": f})
                         except Exception: pass
                     rebuild_topic_index(st.session_state.active_topic, user_api_key); st.rerun()
         if st.button("🗑️ 清空主题", type="primary"):
-            # --- 修改点：连带清空 Pinecone 该主题的 namespace（已增加 get_safe_namespace 转换） ---
             if ts["db"]:
                 try:
                     ts["db"].delete(delete_all=True, namespace=get_safe_namespace(st.session_state.active_topic))
                 except Exception: pass
             ts["files"],ts["chunks"],ts["db"] = [],[],None
             st.session_state.chat_history = []; st.rerun()
-
     st.markdown("---")
     st.subheader("📥 上传 PDF")
     uploaded_file = st.file_uploader("拖入 PDF", type="pdf")
@@ -614,30 +574,26 @@ with st.sidebar:
             os.remove(path); st.rerun()
 
 # ================= 7. 主界面 =================
-
 tab_main, tab_read, tab_notes = st.tabs([
     "🔍 学术检索 & 图谱", "📖 研读空间", "📌 我的笔记"
 ])
 
-# ══════════════════════════════════════════
+# ═════════════════════════════════════════
 # Tab 1：学术检索 & 图谱
-# ══════════════════════════════════════════
+# ═════════════════════════════════════════
 with tab_main:
     st.markdown('<div class="section-divider">🌍 学术检索</div>', unsafe_allow_html=True)
     
-    # --- 修改点：恢复两列布局，去掉独立的下拉框 ---
     sq1,sq2 = st.columns([4,2])
     with sq1:
         search_query = st.text_input("关键词", value=st.session_state.suggested_query,
                                      placeholder="输入关键词，例如: education robot", label_visibility="collapsed")
     with sq2:
         sort_mode = st.selectbox("排序",["🔥 相关性", "🌟 综合(相关+质量)", "💎 质量优先", "📅 最新", "📈 引用量"], label_visibility="collapsed")
-
-    # --- 修改点开始：将固定下拉框改为动态任意比例滑块，并与左侧模式深度绑定 ---
+    
     rel_w = 1.0
     qual_w = 0.0
     if sort_mode in ["🌟 综合(相关+质量)", "💎 质量优先"]:
-        # 根据选择的模式，给予不同的初始滑块位置（综合默认60%，质量优先默认20%）
         default_rel = 60 if "综合" in sort_mode else 20
         rel_weight_pct = st.slider(
             "⚖️ 自定义权重配比 (任意调节，左拉看重质量，右拉看重相关性)",
@@ -646,9 +602,8 @@ with tab_main:
         )
         rel_w = rel_weight_pct / 100.0
         qual_w = 1.0 - rel_w
-        st.caption(f"💡 当前计算规则：总分 = (真实语义分 × **{rel_w:.2f}**) + (AI质量分 × **{qual_w:.2f}**)") # <--- 【修改点 3：更新提示文案】
-    # --- 修改点结束 ---
-
+        st.caption(f"💡 当前计算规则：总分 = (真实语义分 × **{rel_w:.2f}**) + (AI质量分 × **{qual_w:.2f}**)")
+    
     with st.expander("⚙️ 高级筛选 (学科/期刊)"):
         adv1, adv2 = st.columns(2)
         with adv1:
@@ -666,82 +621,85 @@ with tab_main:
             selected_category = st.selectbox("学科分类过滤", list(category_options.keys()))
         with adv2:
             journal_query = st.text_input("期刊/杂志/会议名称 (选填)", placeholder="例如: Nature, IEEE,ACM,CVPR,NIPS")
-
+    
     if st.button("🚀 检索", use_container_width=True) and search_query:
         with st.spinner("正在向 ArXiv 请求数据..."):
             try:
                 asort = arxiv.SortCriterion.Relevance
                 if "最新" in sort_mode: asort = arxiv.SortCriterion.SubmittedDate
                 
-                # --- 修改点：放宽检索条件，最大化召回率，不放过相关论文 ---
                 refined = search_query
                 if " " in search_query and "AND" not in search_query and '"' not in search_query:
-                    # 取消了双引号的强制短语匹配，改用 all 字段的 AND 组合，只要论文里包含这些词就统统找出来
                     refined = " AND ".join([f'all:{w}' for w in search_query.split()])
                 else:
                     refined = f"({refined})"
-
                 if category_options[selected_category]:
                     refined += f" AND cat:{category_options[selected_category]}"
-
                 if journal_query.strip():
                     val = journal_query.strip()
                     refined += f' AND (jr:"{val}" OR co:"{val}")'
                 
-                # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
                 st.caption(f"🔍 检索指令预览: `{refined}`")
-
-                # --- 429 防崩溃重试机制 ---
-                max_retries = 3
+                
+                # ========== 【核心修复：ArXiv 429 限流防护】 ==========
+                max_retries = 5
                 raw = []
                 for attempt in range(max_retries):
                     try:
-                        # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
-                        raw_gen = arxiv.Client().results(arxiv.Search(query=refined, max_results=2000, sort_by=asort))
+                        # 1. 配置客户端：基础延迟 + 重试递增延迟 + 合规User-Agent
+                        client = arxiv.Client(
+                            page_size=100,
+                            delay_seconds=3.0 + attempt * 2,  # 重试时自动拉长间隔
+                            num_retries=2                     # 库内部自带2次兜底重试
+                        )
+                        # 2. 设置合规请求头，大幅降低被限流概率
+                        client._session.headers.update({
+                            "User-Agent": "AI-Research-Assistant/1.0 (Academic Research Tool; contact@example.com)"
+                        })
+                        # 3. 单次最大结果从2000降到500，避免请求过重
+                        raw_gen = client.results(arxiv.Search(query=refined, max_results=500, sort_by=asort))
                         st.session_state.search_generator = raw_gen
-                        # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
+                        # 4. 初次加载100条
                         raw = list(itertools.islice(raw_gen, 100))
                         break 
                     except Exception as e:
                         if "429" in str(e) and attempt < max_retries - 1:
-                            time.sleep(3)
+                            # 指数退避策略：3s → 6s → 12s → 24s
+                            wait_time = 3 * (2 ** attempt)
+                            st.caption(f"⚠️ ArXiv 限流中，第 {attempt+1} 次重试，等待 {wait_time} 秒...")
+                            time.sleep(wait_time)
                             continue
-                        else: raise e
+                        else: 
+                            raise e
                 
-                # --- 新增辅助提示：针对零结果给出清晰引导 ---
                 if not raw:
                     st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
                 
                 st.session_state.search_results = [{"obj":r,"citations":None} for r in raw]
                 
-                # <--- 【修改点 4：在此处批量计算这 100 篇论文与关键词的真实语义余弦相似度】 --->
+                # 批量计算语义相似度
                 if st.session_state.search_results:
                     with st.spinner("正在利用本地向量模型进行底层语义匹配打分..."):
-                        try:
-                            embeddings_model = get_embeddings_model()
-                            # 1. 向量化用户搜索词
-                            query_vec = np.array(embeddings_model.embed_query(search_query))
-                            # 2. 批量提取摘要并向量化
-                            abstracts = [item['obj'].summary for item in st.session_state.search_results]
-                            doc_vecs = np.array(embeddings_model.embed_documents(abstracts))
-                            # 3. 计算余弦相似度公式: (A·B) / (||A|| * ||B||)
-                            norms_doc = np.linalg.norm(doc_vecs, axis=1)
-                            norm_query = np.linalg.norm(query_vec)
-                            similarities = np.dot(doc_vecs, query_vec) / (norms_doc * norm_query)
-                            # 4. 将真实分数转为百分制并写回字典
-                            for idx, item in enumerate(st.session_state.search_results):
-                                item['sim_score'] = float(similarities[idx]) * 100 
-                        except Exception as e:
-                            st.warning(f"本地语义计算异常，将降级使用基础分: {e}")
-                            for item in st.session_state.search_results:
-                                item['sim_score'] = 50.0 # 失败兜底分
-                # <--- 【修改点 4 结束】 --->
-
+                            try:
+                                embeddings_model = get_embeddings_model()
+                                query_vec = np.array(embeddings_model.embed_query(search_query))
+                                abstracts = [item['obj'].summary for item in st.session_state.search_results]
+                                doc_vecs = np.array(embeddings_model.embed_documents(abstracts))
+                                norms_doc = np.linalg.norm(doc_vecs, axis=1)
+                                norm_query = np.linalg.norm(query_vec)
+                                similarities = np.dot(doc_vecs, query_vec) / (norms_doc * norm_query)
+                                for idx, item in enumerate(st.session_state.search_results):
+                                    item['sim_score'] = float(similarities[idx]) * 100 
+                            except Exception as e:
+                                st.warning(f"本地语义计算异常，将降级使用基础分: {e}")
+                                for item in st.session_state.search_results:
+                                    item['sim_score'] = 50.0
+                
                 st.session_state.citations_loaded = False
                 st.session_state.contributions_cache = {}
                 st.session_state.focus_paper_id = None
             except Exception as e: st.error(f"检索失败: {e}")
-
+        
         if st.session_state.search_results:
             t0 = time.time()
             with st.spinner("同步引用数..."):
@@ -755,7 +713,6 @@ with tab_main:
                     import math
                     current_year = datetime.now().year
                     for idx, item in enumerate(st.session_state.search_results):
-                        # <--- 【修改点 5：废弃伪相关性硬编码（if idx < 10 等），直接读取真实向量匹配分】 --->
                         rel_score = item.get('sim_score', 50.0)
                         
                         cites = item["citations"] or 0
@@ -764,7 +721,6 @@ with tab_main:
                         pub_year = item['obj'].published.year
                         age = max(0, current_year - pub_year)
                         
-                        # 针对不同模式计算时效补偿
                         if "质量优先" in sort_mode:
                             time_bonus = 0
                             if age == 0: time_bonus = 40
@@ -775,24 +731,21 @@ with tab_main:
                             
                         quality_score = min(100.0, cite_score + time_bonus)
                         
-                        # 融合真实语义分与质量分
                         item["total_score"] = (rel_score * rel_w) + (quality_score * qual_w)
                         
                     st.session_state.search_results.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-                # <--- 【修改点 5 结束】 --->
                 
                 st.session_state.citations_loaded = True
             
             st.success(f"✅ 完成，找到 {len(st.session_state.search_results)} 篇")
             preload_top_graphs(st.session_state.search_results, ss_key=ss_api_key, top_n=3)
-
+    
     # ── 图谱区 ──
     if st.session_state.focus_paper_id:
         st.markdown('<div class="section-divider">📊 文献关联图谱</div>', unsafe_allow_html=True)
         min_cf = st.slider("最低引用数过滤", 0, 200, 5, step=1, key="graph_cite_filter")
         with st.spinner("加载图谱…"):
-            g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_api_key)
-
+            g_data = fetch_graph_data(st.session_state.focus_paper_id, ss_key=ss_key)
         if not g_data:
             st.warning("⚠️ 暂时无法获取图谱，请稍后再试。")
         else:
@@ -804,7 +757,6 @@ with tab_main:
                     all_details[sid]['arxiv_id'] = get_pure_arxiv_id(st.session_state.focus_paper_id)
                 if not (clicked_id and clicked_id in all_details):
                     st.caption("👆 点击节点 → 右侧看完整详情 | 🔴 当前  🟢 引用本文  🔵 本文引用")
-
             with gc_info:
                 if clicked_id and clicked_id in all_details:
                     info = all_details[clicked_id]
@@ -863,7 +815,7 @@ with tab_main:
                             ← 点击左侧节点<br>查看完整详情</div>""",
                         unsafe_allow_html=True,
                     )
-
+    
     # ── 检索结果列表 ──
     if st.session_state.search_results:
         st.markdown(
@@ -871,8 +823,7 @@ with tab_main:
             f'<span class="perf-badge">⚡ 缓存 {len(st.session_state.citations_global_cache)} 篇</span></div>',
             unsafe_allow_html=True
         )
-
-        # --- 修改点开始：将下载和打分按钮重构为三列，加入动态数量输入，并新增打包下载 PDF 功能 ---
+        
         col_excel, col_score, col_pdf = st.columns(3)
         
         with col_excel:
@@ -884,7 +835,6 @@ with tab_main:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-
         with col_score:
             score_num = st.number_input("⭐ **打分数量 (篇)**", min_value=1, max_value=max(1, len(st.session_state.search_results)), value=min(20, len(st.session_state.search_results)), step=1, key="batch_score_n")
             if st.button(f"🚀 开始打分 (前 {score_num} 篇)", use_container_width=True):
@@ -916,16 +866,11 @@ with tab_main:
                 dl_end = st.number_input("到第", min_value=dl_start, max_value=max(dl_start, len(st.session_state.search_results)), value=max(dl_start, min(dl_start + 9, len(st.session_state.search_results))), step=1, key="batch_dl_end")
             
             if st.button(f"🔄 打包 ZIP ({dl_start}-{dl_end} 篇)", use_container_width=True):
-                # ==========================
-                # --- 新修改点：重构打包逻辑，开启真实硬盘流式传输，彻底防止内存崩溃 ---
-                # ==========================
                 import zipfile
-                # 使用硬盘临时文件替代内存缓冲
                 temp_zip_path = os.path.join(tempfile.gettempdir(), f"arxiv_batch_{uuid.uuid4().hex[:8]}.zip")
                 to_dl = st.session_state.search_results[dl_start-1 : dl_end]
                 dl_total = len(to_dl)
                 
-                # 使用状态文本与进度条，保证网页实时与后台通讯
                 status_text = st.empty()
                 progress_bar = st.progress(0)
                 
@@ -934,11 +879,8 @@ with tab_main:
                         res = item['obj']
                         status_text.text(f"📥 正在提取并压缩 ({idx+1}/{dl_total}): {res.title[:25]}...")
                         try:
-                            # 增加 1.5 秒安全休眠，防高并发触发 ArXiv 的防 DDoS 封锁
-                            time.sleep(1.5)
                             p_path = download_arxiv_pdf_direct(res.entry_id)
                             safe_title = re.sub(r'[\\/*?:"<>|]', "", res.title)[:50]
-                            # 文件名加上原始排名序号，方便对应
                             filename = f"{dl_start + idx}_{safe_title}.pdf"
                             zf.write(p_path, arcname=filename)
                             try:
@@ -947,19 +889,13 @@ with tab_main:
                                 pass
                         except Exception as e:
                             pass 
-                        # 每次循环更新进度，维持前端存活
                         progress_bar.progress((idx + 1) / dl_total)
                 
                 status_text.text("✅ 打包完成！正在生成最终下载链接...")
                 
-                # 保留文件路径，而不是将几百兆数据塞进内存变量
                 st.session_state.ready_zip_path = temp_zip_path
                 st.session_state.ready_zip_name = f"ArXiv_PDFs_{dl_start}to{dl_end}_{datetime.now().strftime('%m%d_%H%M')}.zip"
-                # ==========================
-                # --- 新修改点结束 ---
-                # ==========================
             
-            # 如果缓存里有打包好的文件路径，打开文件流供按钮下载，零内存占用！
             if st.session_state.get("ready_zip_path") and os.path.exists(st.session_state.get("ready_zip_path")):
                 with open(st.session_state.ready_zip_path, "rb") as f:
                     st.download_button(
@@ -970,7 +906,6 @@ with tab_main:
                         use_container_width=True,
                         type="primary"
                     )
-        # --- 修改点结束 ---
         
         st.markdown("---")
         
@@ -980,7 +915,6 @@ with tab_main:
             cite_html = (f"<span class='cite-badge'>{cites}</span>" if cites is not None
                          else "<span class='cite-loading'>加载中…</span>")
             with st.expander(f"#{i+1} {res.title} ({res.published.year})"):
-                # <--- 【修改点 6：在每篇论文展开的标题栏，同时显示刚刚算出来的真实向量分数】 --->
                 sim_display = f" | 🎯 匹配度: {round(item.get('sim_score', 0), 1)}%"
                 st.markdown(
                     f"**{', '.join([a.name for a in res.authors])}** | "
@@ -1028,15 +962,12 @@ with tab_main:
         
     if st.session_state.search_generator:
         st.markdown("---")
-        # --- 修改点：按钮文案同步修改为 100 篇 ---
         if st.button("🔽 加载更多 100 篇...", use_container_width=True):
             with st.spinner("正在拉取新论文摘要并计算语义分数..."):
-                # --- 修改点：每次额外拉取数量提升到 100 ---
                 more_raw = list(itertools.islice(st.session_state.search_generator, 100))
                 if more_raw:
                     new_results = [{"obj": r, "citations": None} for r in more_raw]
                     
-                    # <--- 【修改点 7：在“加载更多”时，也必须对这新来的 100 篇计算真实的语义分数】 --->
                     try:
                         embeddings_model = get_embeddings_model()
                         query_vec = np.array(embeddings_model.embed_query(search_query))
@@ -1050,8 +981,7 @@ with tab_main:
                     except Exception as e:
                         for item in new_results:
                             item['sim_score'] = 50.0 
-                    # <--- 【修改点 7 结束】 --->
-
+                    
                     id2c = smart_fetch_citations(new_results, ss_key=ss_api_key)
                     for item in new_results:
                         item["citations"] = id2c.get(item['obj'].entry_id, 0)
@@ -1063,7 +993,6 @@ with tab_main:
                         import math
                         current_year = datetime.now().year
                         for idx, item in enumerate(st.session_state.search_results):
-                            # <--- 【修改点 8：废弃伪相关性，应用真实分数】 --->
                             rel_score = item.get('sim_score', 50.0)
                             
                             cites = item["citations"] or 0
@@ -1087,8 +1016,7 @@ with tab_main:
                     st.rerun()
                 else:
                     st.info("✨ 到底啦。")
-   
-    
+
 # ══════════════════════════════════════════
 # Tab 2：研读空间
 # ══════════════════════════════════════════
