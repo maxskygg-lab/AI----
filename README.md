@@ -47,8 +47,6 @@
 ```text
 ├── app.py                  # Streamlit 主程序入口
 ├── requirements.txt        # 项目依赖库
-├── data/                   # 实验与检索结果 Excel 数据集 (0% - 100% 权重样本)
-├── utils/                  # 核心工具函数（向量计算、AI 打分、Excel 导出）
 ├──README.md               # 项目说明文档
 └── offline_builder.py      #忘记是干嘛用的了，有没有用也不知道，是不是为了删了也不知道
 
