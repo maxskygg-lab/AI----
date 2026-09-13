@@ -152,7 +152,7 @@ def get_deepseek_llm(api_key, temperature=0.1):
     return ChatOpenAI(
         model="deepseek-chat",
         openai_api_key=api_key,
-        openai_api_base="https://api.deepseek.com",
+        openai_api_base="https://api.deepseek.com/v1",
         temperature=temperature
     )
 
@@ -368,7 +368,8 @@ def get_paper_score(arxiv_id, title, abstract, api_key, ss_key):
             r = requests.get(url, headers=headers, timeout=5)
             if r.status_code == 200:
                 data = r.json()
-                tldr = data.get("tldr", {}).get("text", "无") if data.get("tldr") else "无"
+                tldr_data = data.get("tldr")
+                tldr = tldr_data.get("text", "无") if isinstance(tldr_data, dict) else "无"
                 inf_cites = data.get("influentialCitationCount", 0)
                 pub_year = data.get("year", "未知年份")
                 ss_info = f"\n\n【Semantic Scholar 真实辅助数据】\n- 发表年份: {pub_year}\n- 极具影响力引用数: {inf_cites}\n- 官方TLDR摘要: {tldr}"
@@ -935,7 +936,10 @@ with tab_main:
                             # 文件名加上原始排名序号，方便对应
                             filename = f"{dl_start + idx}_{safe_title}.pdf"
                             zf.write(p_path, arcname=filename)
-                            os.remove(p_path) 
+                            try:
+                                os.remove(p_path) 
+                            except Exception:
+                                pass
                         except Exception as e:
                             pass 
                         # 每次循环更新进度，维持前端存活
