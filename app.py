@@ -691,23 +691,33 @@ with tab_main:
                 # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
                 st.caption(f"🔍 检索指令预览: `{refined}`")
 
-                # --- 429 防崩溃重试机制 ---
-                max_retries = 3
+                # --- 429 & 503 防崩溃重试机制（将 page_size 降至 20，彻底解决 503 报错） ---
+                max_retries = 5
                 raw = []
+                
+                # 显式初始化 Client：将单页请求量 page_size 降至 20（默认是100），大幅减轻 ArXiv 服务器负担
+                client = arxiv.Client(
+                    page_size=20,
+                    delay_seconds=3,
+                    num_retries=5
+                )
+                search = arxiv.Search(query=refined, max_results=30, sort_by=asort)
+                
                 for attempt in range(max_retries):
                     try:
-                        # --- 修改点：增加 max_results=2000，让 ArXiv 把底库翻个底朝天 ---
-                        raw_gen = arxiv.Client().results(arxiv.Search(query=refined, max_results=2000, sort_by=asort))
+                        raw_gen = client.results(search)
                         st.session_state.search_generator = raw_gen
-                        # --- 修改点：初次加载数量从 50 提升到 100，避免单次太多导致 API 崩溃 ---
-                        raw = list(itertools.islice(raw_gen, 100))
+                        raw = list(itertools.islice(raw_gen, 30))
                         break 
                     except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            time.sleep(3)
+                        err_msg = str(e)
+                        # 同时捕获 429（限流）与 503（服务器繁忙/拒答），进行退避重试
+                        if ("429" in err_msg or "503" in err_msg) and attempt < max_retries - 1:
+                            time.sleep((attempt + 1) * 4) # 递增等待 4s, 8s, 12s, 16s...
                             continue
-                        else: raise e
-                
+                        else:
+                            raise e
+
                 # --- 新增辅助提示：针对零结果给出清晰引导 ---
                 if not raw:
                     st.warning("⚠️ 未找到匹配论文。建议：1. 缩减关键词 2. 清空‘期刊名称’筛选框 3. 检查学科分类是否选错。")
