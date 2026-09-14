@@ -691,15 +691,19 @@ with tab_main:
                 # --- 终极安全检索逻辑：防崩溃、逐条获取、精准拦截 503 ---
                 search = arxiv.Search(query=refined, max_results=30, sort_by=asort)
                 
-                # 1. 初始化客户端，设置极度保守的参数
+                # 1. 初始化客户端：强制将底层请求 URL 的批次量 (page_size) 从默认的 100 降为 15
                 client = arxiv.Client(
-                    page_size=10,         # 每次只向 ArXiv 索要 10 条（极大地减轻服务器负担）
-                    delay_seconds=3.0,    # 严格遵守 ArXiv 官方的 3 秒间隔规则
-                    num_retries=3         # 库自带的底层重试机制
+                    page_size=15,         # 关键修改：直接控制发送给服务器的单次索要数量
+                    delay_seconds=4.0,    # 满足 ArXiv 要求的强制冷却时间
+                    num_retries=3
                 )
                 
-                raw = []
-                max_retries = 4
+                # 2. 搜索条件：限制最终需要的总数不超过 30
+                search = arxiv.Search(
+                    query=refined, 
+                    max_results=30, 
+                    sort_by=asort
+                )
                 
                 for attempt in range(max_retries):
                     try:
