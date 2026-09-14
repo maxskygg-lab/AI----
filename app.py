@@ -688,40 +688,47 @@ with tab_main:
                     val = journal_query.strip()
                     refined += f' AND (jr:"{val}" OR co:"{val}")'
                 
-                # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
-                st.caption(f"🔍 检索指令预览: `{refined}`")
-
-                # --- 严格遵循 ArXiv 官方 3 秒限流规则与 User-Agent 防封禁机制 ---
-                client = arxiv.Client(
-                    page_size=20,         # 1. 降低单页抓取量，减轻 API 负载
-                    delay_seconds=3.0,    # 2. 核心：严格遵循 ArXiv 官方规定（每两次请求至少间隔 3 秒）
-                    num_retries=5         # 3. 开启内部 5 次自动重试
-                )
-                
-                # 4. 显式伪装 User-Agent，防止被 ArXiv 防火墙判定为非法 Python 爬虫直接返回 503
-                client._session.headers.update({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AcademicAssistant/1.0"
-                })
-
+                # --- 终极安全检索逻辑：防崩溃、逐条获取、精准拦截 503 ---
                 search = arxiv.Search(query=refined, max_results=30, sort_by=asort)
                 
+                # 1. 初始化客户端，设置极度保守的参数
+                client = arxiv.Client(
+                    page_size=10,         # 每次只向 ArXiv 索要 10 条（极大地减轻服务器负担）
+                    delay_seconds=3.0,    # 严格遵守 ArXiv 官方的 3 秒间隔规则
+                    num_retries=3         # 库自带的底层重试机制
+                )
+                
                 raw = []
-                max_retries = 5
+                max_retries = 4
+                
                 for attempt in range(max_retries):
                     try:
-                        time.sleep(1) # 5. 发起请求前增加额外缓冲
+                        time.sleep(2) # 每次真正发起请求前，强制主线程休眠 2 秒缓冲
+                        
+                        # 建立生成器（此时还未发起真实网络请求）
                         raw_gen = client.results(search)
                         st.session_state.search_generator = raw_gen
-                        raw = list(itertools.islice(raw_gen, 30))
-                        break 
+                        
+                        # 2. 核心修改：弃用容易一次性崩盘的 itertools.islice，改为安全的逐条迭代
+                        raw = []
+                        for paper in raw_gen:
+                            raw.append(paper)
+                            if len(raw) >= 30: # 凑够 30 条立刻手动刹车
+                                break
+                                
+                        break # 如果成功走完这一步，说明没报错，直接跳出重试循环
+                        
                     except Exception as e:
                         err_str = str(e)
-                        # 6. 同时捕获 429 (限流) 与 503 (服务器繁忙) 进行指数退避重试
-                        if ("429" in err_str or "503" in err_str) and attempt < max_retries - 1:
-                            time.sleep((attempt + 1) * 5) # 依次等待 5s, 10s, 15s, 20s
+                        # 3. 如果是被官方限流或服务器宕机，且还有重试机会
+                        if ("503" in err_str or "429" in err_str) and attempt < max_retries - 1:
+                            time.sleep(4 + attempt * 4) # 依次退避等待 4秒, 8秒, 12秒
                             continue
                         else:
-                            raise e
+                            # 4. 达到最大重试次数仍失败，拦截崩溃并给出保底提示
+                            st.error(f"🚨 ArXiv 官方服务器暂时拒绝了连接请求。")
+                            st.warning(f"**诊断信息**: {err_str}\n\n**原因分析**: 您当前应用部署在 Streamlit Cloud 上，其共享的公网 IP 极易被 ArXiv 官方防爬虫系统临时封禁（HTTP 503）。\n\n**建议方案**:\n- 请稍等 10-30 分钟后再试。\n- 若需长期稳定运行，建议将代码拉取到本地电脑运行，或将底层的检索数据源彻底迁移为 Semantic Scholar。")
+                            break # 终止循环，防止整个网页死机
 
                 # --- 新增辅助提示：针对零结果给出清晰引导 ---
                 if not raw:
