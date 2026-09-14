@@ -691,29 +691,34 @@ with tab_main:
                 # --- 新增辅助提示：在界面上显示真实发送给接口的查询语句 ---
                 st.caption(f"🔍 检索指令预览: `{refined}`")
 
-                # --- 429 & 503 防崩溃重试机制（将 page_size 降至 20，彻底解决 503 报错） ---
-                max_retries = 5
-                raw = []
-                
-                # 显式初始化 Client：将单页请求量 page_size 降至 20（默认是100），大幅减轻 ArXiv 服务器负担
+                # --- 严格遵循 ArXiv 官方 3 秒限流规则与 User-Agent 防封禁机制 ---
                 client = arxiv.Client(
-                    page_size=20,
-                    delay_seconds=3,
-                    num_retries=5
+                    page_size=20,         # 1. 降低单页抓取量，减轻 API 负载
+                    delay_seconds=3.0,    # 2. 核心：严格遵循 ArXiv 官方规定（每两次请求至少间隔 3 秒）
+                    num_retries=5         # 3. 开启内部 5 次自动重试
                 )
+                
+                # 4. 显式伪装 User-Agent，防止被 ArXiv 防火墙判定为非法 Python 爬虫直接返回 503
+                client._session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AcademicAssistant/1.0"
+                })
+
                 search = arxiv.Search(query=refined, max_results=30, sort_by=asort)
                 
+                raw = []
+                max_retries = 5
                 for attempt in range(max_retries):
                     try:
+                        time.sleep(1) # 5. 发起请求前增加额外缓冲
                         raw_gen = client.results(search)
                         st.session_state.search_generator = raw_gen
                         raw = list(itertools.islice(raw_gen, 30))
                         break 
                     except Exception as e:
-                        err_msg = str(e)
-                        # 同时捕获 429（限流）与 503（服务器繁忙/拒答），进行退避重试
-                        if ("429" in err_msg or "503" in err_msg) and attempt < max_retries - 1:
-                            time.sleep((attempt + 1) * 4) # 递增等待 4s, 8s, 12s, 16s...
+                        err_str = str(e)
+                        # 6. 同时捕获 429 (限流) 与 503 (服务器繁忙) 进行指数退避重试
+                        if ("429" in err_str or "503" in err_str) and attempt < max_retries - 1:
+                            time.sleep((attempt + 1) * 5) # 依次等待 5s, 10s, 15s, 20s
                             continue
                         else:
                             raise e
